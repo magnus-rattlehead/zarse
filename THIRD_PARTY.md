@@ -1,12 +1,12 @@
-# Temporary codec dependencies
+# Third-party sources
 
 zig builds pinned c codec sources until native zig replacements are available.
 
 - Opus 1.5.2: https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz (BSD-style license below).
   Portable source lists in `build/opus.zig` come from this release.
 
-- libvorbis 1.3.7: https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz
-  (bsd-style license below). `build/vorbis.zig` builds core sources only.
+- libvorbis 1.3.7: https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz (bsd-style
+  license below). `build/vorbis.zig` builds core sources only.
 
 ## Opus notice
 

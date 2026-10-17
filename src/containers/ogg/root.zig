@@ -1,4 +1,4 @@
-//! ogg packet reading, page synchronization, and stream framing.
+//! ogg packet reading, page synchronization, and stream framing
 pub const Reader = @import("Ogg.zig");
 pub const framing = @import("framing.zig");
 pub const Page = framing.Page;

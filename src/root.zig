@@ -1,3 +1,4 @@
+//! public audio types, decoding pipeline and container parsers
 pub const types = @import("types.zig");
 pub const parse = wave.parse;
 pub const wave64 = wave.wave64;
@@ -30,3 +31,4 @@ pub const OpusConfig = types.OpusConfig;
 pub const VorbisConfig = types.VorbisConfig;
 pub const wave = @import("containers/wave/root.zig");
 pub const ogg = @import("containers/ogg/root.zig");
+pub const mp3 = @import("containers/mp3/root.zig");

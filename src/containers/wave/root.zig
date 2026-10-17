@@ -1,4 +1,4 @@
-//! wav/wave64 packet reading and riff parsing.
+//! wav and wave64 packet reading and riff parsing
 pub const Reader = @import("Wave.zig");
 pub const riff = @import("riff.zig");
 pub const parse = Reader.parse;

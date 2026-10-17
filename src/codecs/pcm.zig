@@ -1,4 +1,4 @@
-//! convert pcm into interleaved f32 samples.
+//! convert pcm into interleaved f32 samples
 const std = @import("std");
 const types = @import("../types.zig");
 const Codec = @import("../Codec.zig");
@@ -11,7 +11,7 @@ pub const preroll_frames: u64 = 0;
 format: Config,
 channels: u16,
 
-/// validate the format and allocate the adapter and sample buffer.
+/// validate the format and allocate the adapter and sample buffer
 pub fn init(
     allocator: std.mem.Allocator,
     config: Config,
@@ -19,6 +19,7 @@ pub fn init(
     options: types.Options,
 ) Error!Codec {
     if (format.sample_rate == 0) return error.InvalidData;
+    // pcm unit contains exactly one sample per channel
     const input_scheme = try scheme(config, format.channels);
     const unit = Self{ .format = config, .channels = format.channels };
     const adapter = try Codec.UnitAdapter(Self)
@@ -26,9 +27,10 @@ pub fn init(
     return adapter.interface(.pcm);
 }
 
-/// convert complete frames; output must fit all samples.
+/// convert complete frames; output must fit all samples
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     const size = self.format.sample_type.byteSize();
+    // reject partial channel frames before converting samples
     if (bytes.len % (size * self.channels) != 0) return error.InvalidData;
     const samples = bytes.len / size;
     if (output.len < samples) return error.InvalidBufferSize;
@@ -41,13 +43,13 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     return samples / self.channels;
 }
 
-/// pcm has no decoding history.
+/// reset stateless pcm conversion
 pub fn reset(_: *Self) void {}
 
-/// pcm has no separate decoder allocation.
+/// clean up stateless pcm conversion
 pub fn deinit(_: *Self) void {}
 
-/// validate the format and return its frame size.
+/// validate the format and return its frame size
 pub fn scheme(format: Config, channels: u16) Error!types.InputScheme {
     if (channels == 0) return error.InvalidData;
     try validateFormat(format);
@@ -57,7 +59,7 @@ pub fn scheme(format: Config, channels: u16) Error!types.InputScheme {
     };
 }
 
-/// reject zero valid_bits or precision beyond the storage width.
+/// reject zero valid_bits or precision beyond the storage width
 pub fn validateFormat(format: types.PcmFormat) types.ValidationError!void {
     if (format.valid_bits) |valid_bits| {
         if (valid_bits == 0 or valid_bits > format.sample_type.byteSize() * 8) {
@@ -66,9 +68,11 @@ pub fn validateFormat(format: types.PcmFormat) types.ValidationError!void {
     }
 }
 
-/// convert one complete encoded sample to f32.
+/// convert one complete encoded sample to f32
 fn decodeSample(bytes: []const u8, format: types.PcmFormat) f32 {
     const endian = format.byte_order;
+    // unsigned pcm centered at 128, signed pcm divided by sign bit magnitude
+    // float formats preserve encoded scale, valid bits already left aligned
     return switch (format.sample_type) {
         .unsigned8 => (@as(f32, @floatFromInt(bytes[0])) - 128.0) / 128.0,
         .signed8 => @as(f32, @floatFromInt(@as(i8, @bitCast(bytes[0]))))

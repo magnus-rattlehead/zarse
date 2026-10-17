@@ -1,5 +1,5 @@
-//! read one opus or vorbis stream; framing handles pages and packets.
-//! codec headers, timing, trimming, and seeking are handled here.
+//! read one opus or vorbis stream; framing handles pages and packets
+//! codec headers, timing, trimming, and seeking are handled here
 //! opus mapping: https://www.rfc-editor.org/rfc/rfc7845.html
 const std = @import("std");
 const types = @import("../../types.zig");
@@ -27,40 +27,42 @@ vorbis_headers: if (codec_options.vorbis) ?*Vorbis.Headers else void = if (
     null
 else {
 },
+// owned header copies, keep stable while packet source and codec initialize
 header_bytes: [3][]const u8 = .{ &.{}, &.{}, &.{} },
+// previous vorbis transform size, zero before first overlap packet
 previous_block: u16 = 0,
-/// shift wire granules onto a nonnegative decode timeline.
+/// shift wire granules onto a nonnegative decode timeline
 granule_shift: i128 = 0,
-/// the first audio page may contain only a zero-output packet.
+/// the first audio page may contain only a zero output packet
 initial_prime: []const u8 = &.{},
 prime_location: ?Pages.Location = null,
 prime_pending: bool = false,
 metadata: types.Info = undefined,
-/// sample interval retained after leading and trailing trimming.
+/// sample interval retained after leading and trailing trimming
 presentation: types.Presentation = .{},
-/// granule position before the first decoded sample.
+/// granule position before the first decoded sample
 origin: u64 = 0,
-/// next packet's untrimmed position on the granule timeline.
+/// next packet untrimmed position on the granule timeline
 frame: u64 = 0,
-/// pair untrimmed positions with packet locations.
+/// pair untrimmed positions with packet locations
 index: SeekIndex = .{},
-/// per-packet sample counts for the current page.
+/// per packet sample counts for the current page
 durations: [255]u16 = undefined,
 headers: u8 = 0,
 first_audio: bool = true,
-/// send final trim bounds before packets on the end page.
+/// send final trim bounds before packets on the end page
 bounds_pending: bool = false,
 configured: bool = false,
 seekable: bool = false,
 
-/// recognize the prefix; validate pages when opening.
+/// recognize the prefix; validate pages when opening
 pub fn probe(prefix: []const u8) bool {
     return std.mem.startsWith(u8, prefix, "OggS");
 }
 
-/// open borrowed input after its four-byte prefix. keep input unchanged.
-/// allocate packet storage and any seek index; scan seekable input.
-/// packets and tags must fit the configured buffer; errors may move input.
+/// open borrowed input after its four byte prefix; keep input unchanged
+/// allocate packet storage and any seek index; scan seekable input
+/// packets and tags must fit the configured buffer; errors may move input
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -83,6 +85,7 @@ pub fn init(
     try self.pages.initBuffers(options.bufferCapacity());
     self.seekable = source.seek_to != null and try source.getSize() != null;
     if (!try self.loadAudioPage()) return error.InvalidData;
+    // scan packet locations and durations, then restore playback origin
     if (self.seekable) {
         if (self.prime_location) |location| {
             try self.index.append(
@@ -127,17 +130,18 @@ pub fn init(
     };
 }
 
-/// accept packet framing once; packet boundaries are already known.
+/// accept packet framing once; packet boundaries are already known
 pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
     if (self.configured) return error.InvalidState;
     if (scheme != .packets) return error.UnsupportedEncoding;
     self.configured = true;
 }
 
-/// emit trim bounds, a packet, or end of input.
-/// packet bytes expire on the next advancing source operation.
+/// emit trim bounds, a packet, or end of input
+/// packet bytes expire on the next advancing source operation
 pub fn next(self: *Self) Error!PacketSource.Event {
     if (!self.configured) return error.InvalidState;
+    // vorbis overlap packet must reach codec before first audible packet
     if (self.prime_pending) {
         self.prime_pending = false;
         return .{ .packet = .{ .bytes = self.initial_prime, .duration = 0 } };
@@ -147,11 +151,13 @@ pub fn next(self: *Self) Error!PacketSource.Event {
             return .end;
         }
     }
+    // announce final trim before returning any packet affected by it
     if (self.bounds_pending) {
         self.bounds_pending = false;
         return .{ .presentation = self.presentation };
     }
     const packet = self.pages.nextPacket().?;
+    // timestamp uses packet start, frame advances by untrimmed pcm duration
     const frame = self.frame;
     self.frame = std.math.add(u64, frame, self.durations[packet.index])
         catch return error.InvalidData;
@@ -171,13 +177,13 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     };
 }
 
-/// return metadata with untrimmed counts; the decoder reports trimmed counts.
+/// return metadata with untrimmed counts; the decoder reports trimmed counts
 pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
-/// seek at or before an untrimmed target with codec preroll subtracted.
-/// the decoder resets codec history and discards samples before the target.
+/// seek at or before an untrimmed target with codec preroll subtracted
+/// the decoder resets codec history and discards samples before the target
 pub fn seek(self: *Self, target: u64) Error!PacketSource.SeekResult {
     if (!self.seekable) return error.Unseekable;
     if (self.is_vorbis) return self.seekVorbis(target);
@@ -192,7 +198,7 @@ pub fn seek(self: *Self, target: u64) Error!PacketSource.SeekResult {
     };
 }
 
-/// free owned storage; leave borrowed input open.
+/// free owned storage; leave borrowed input open
 pub fn deinit(self: *Self) void {
     if (codec_options.vorbis) {
         if (self.vorbis_headers) |headers| {
@@ -209,17 +215,17 @@ pub fn deinit(self: *Self) void {
     allocator.destroy(self);
 }
 
-/// validate the identification header; copy mapping, pre-skip, and gain.
+/// validate the identification header; copy mapping, pre skip, and gain
 fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
-    // 19 bytes: signature (8), version (1), channels (1), pre-skip (2),
-    // input rate (4), gain (2), mapping family (1).
+    // 19 bytes, signature 8 bytes, version 1 bytes, channels 1 bytes, pre skip 2 bytes
+    // input rate 4 bytes, gain 2 bytes, mapping family 1 bytes
     if (
         packet_bytes.len < 19
             or !std.mem.eql(u8, packet_bytes[0..8], "OpusHead")
     ) {
         return error.UnsupportedEncoding;
     }
-    // versions 1..15 share the supported major version.
+    // versions 1 to 15 share the supported major version
     if (packet_bytes[8] == 0 or packet_bytes[8] > 15) {
         return error.UnsupportedEncoding;
     }
@@ -232,15 +238,15 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
         .channels = channels,
         .total_frames = null,
     };
-    // 10..12 holds pre-skip; 12..16 is the informational input rate.
-    // decoding and granules always use 48 khz.
+    // pre skip at byte 10, informational input rate at byte 12
+    // decoding and granules always use 48 khz
     self.presentation.start = std.mem.readInt(
         u16,
         packet_bytes[10..12],
         .little,
     );
     self.config.gain_q8 = std.mem.readInt(i16, packet_bytes[16..18], .little);
-    // family 0 implies mono/stereo; family 1 carries a channel map.
+    // family 0 implies mono or stereo; family 1 carries a channel map
     switch (packet_bytes[18]) {
         0 => {
             if (
@@ -252,7 +258,7 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
             self.config.coupled_streams = channels - 1;
         },
         1 => {
-            // family 1: stream counts at 19/20, then one map byte per channel.
+            // family 1, stream counts at 19 and 20, then one map byte per channel
             if (packet_bytes.len < 21 + @as(usize, channels)) {
                 return error.InvalidData;
             }
@@ -264,8 +270,7 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
             }
             self.config.streams = packet_bytes[19];
             self.config.coupled_streams = packet_bytes[20];
-            // coupled streams code two channels, so maps address streams +
-            // coupled.
+            // coupled streams add one extra coded channel each
             if (
                 packet_bytes[19] == 0
                     or packet_bytes[20] > packet_bytes[19]
@@ -277,7 +282,7 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
                 self.config.mapping[0..channels],
                 packet_bytes[21..][0..channels],
             );
-            // map value 255 requests silence.
+            // map value 255 requests silence
             for (self.config.mapping[0..channels]) |channel_index| {
                 if (
                     channel_index != 255
@@ -292,24 +297,24 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
     }
 }
 
-/// validate vendor and comment lengths; allow trailing padding.
+/// validate vendor and comment lengths; allow trailing padding
 fn parseOpusTags(packet_bytes: []const u8) Error!void {
     if (!std.mem.startsWith(u8, packet_bytes, "OpusTags")) {
         return error.InvalidData;
     }
-    // read little-endian u32 lengths for the vendor and each comment,
-    // with a u32 comment count after the vendor.
+    // read little endian u32 lengths for the vendor and each comment
+    // with a u32 comment count after the vendor
     var comments = try VorbisComments.init(packet_bytes[8..]);
     while (try comments.next()) |_| {}
 }
 
-/// read duration from the first stream's toc, in 48 khz samples per channel.
-/// check framing and the 120 ms limit; the codec validates stream payloads.
+/// read duration from the first stream toc, in 48 khz samples per channel
+/// check framing and the 120 ms limit; the codec validates stream payloads
 fn opusDuration(packet_bytes: []const u8) Error!u16 {
     if (packet_bytes.len == 0) return error.InvalidData;
     const toc = packet_bytes[0];
-    // toc bit 7: celt uses 2.5/5/10/20 ms frames.
-    // bits 6..5 == 11: hybrid uses 10/20 ms; silk uses 10/20/40/60 ms.
+    // toc bit 7, celt uses 2.5, 5, 10 or 20 ms frames
+    // bits 6 to 5 both set, hybrid uses 10 or 20 ms; silk uses 10, 20, 40 or 60 ms
     const samples_per_frame: u16 = if (toc & 128 != 0)
         @as(u16, 120) << @as(u2, @truncate(toc >> 3))
     else if (toc & 0x60 == 0x60)
@@ -322,7 +327,7 @@ fn opusDuration(packet_bytes: []const u8) Error!u16 {
             else => 2880,
         };
     // low toc bits select one frame, two, or a count in the next byte
-    // (low six bits; upper bits are flags).
+    // low six bits hold count, upper bits are flags
     const frame_count: u16 = switch (toc & 3) {
         0 => 1,
         1, 2 => 2,
@@ -332,25 +337,25 @@ fn opusDuration(packet_bytes: []const u8) Error!u16 {
             packet_bytes[1] & 63,
     };
     const packet_samples: u32 = @as(u32, samples_per_frame) * frame_count;
-    // 120 ms maximum = 5760 samples at 48 khz.
+    // 120 ms maximum means 5760 samples at 48 khz
     if (frame_count == 0 or packet_samples > 5760) return error.InvalidData;
     return @intCast(packet_samples);
 }
 
-/// read an audio page and calculate untrimmed positions.
-/// the granule ends its last completed packet; the final page may trim output.
+/// read an audio page and calculate untrimmed positions
+/// the granule ends its last completed packet; the final page may trim output
 fn loadAudioPage(self: *Self) Error!bool {
     if (self.is_vorbis) return self.loadVorbisPage();
     return self.loadOpusPage();
 }
 
-/// identify the codec from the first stream packet.
+/// identify the codec from the first stream packet
 fn readFirstHeader(self: *Self, bytes: []const u8) Error!void {
     if (std.mem.startsWith(u8, bytes, "\x01vorbis")) {
         if (!codec_options.vorbis) return error.UnsupportedEncoding;
-        // identification header: type (1), signature (6), version (4), channels
-        // (1), rate (4), bitrate hints (12), block sizes (1), framing (1).
-        // libvorbis validates fields and reads the format.
+        // identification header, type 1 bytes, signature 6 bytes, version 4 bytes, channels
+        // 1 bytes, rate 4 bytes, bitrate hints 12 bytes, block sizes 1 bytes, framing 1 bytes
+        // libvorbis validates fields and reads the format
         if (bytes.len != 30) return error.InvalidData;
         self.is_vorbis = true;
         const headers = try self.allocator.create(Vorbis.Headers);
@@ -371,30 +376,33 @@ fn readFirstHeader(self: *Self, bytes: []const u8) Error!void {
     }
 }
 
+/// validate header and retain owned copy for codec initialization
 fn addVorbisHeader(self: *Self, bytes: []const u8) Error!void {
     if (!codec_options.vorbis) return error.UnsupportedEncoding;
     if (self.headers == 1) {
-        // header types: identification (0x01), comment (0x03), setup (0x05).
-        // each is followed by the six-byte signature.
+        // header types, identification 0x01, comment 0x03, setup 0x05
+        // each is followed by the six byte signature
         if (!std.mem.startsWith(u8, bytes, "\x03vorbis"))
             return error.InvalidData;
         var comments = try VorbisComments.init(bytes[7..]);
         while (try comments.next()) |_| {}
-        // vorbis comments require a trailing framing bit.
+        // vorbis comments require a trailing framing bit
         if (comments.remaining.len == 0 or comments.remaining[0] & 1 == 0)
             return error.InvalidData;
     }
     try self.vorbis_headers.?.add(bytes);
+    // page storage reused on next read, retain independent header bytes
     self.header_bytes[self.headers] = try self.allocator.dupe(u8, bytes);
 }
 
+/// read headers then derive packet durations and final trim from page granule
 fn loadOpusPage(self: *Self) Error!bool {
     while (try self.pages.nextPage()) {
         while (self.headers < 2 and self.pages.hasPacket()) {
             const packet = self.pages.nextPacket().?;
             if (self.headers == 0) {
-                // the identification packet must be alone on the stream-start
-                // page.
+                // the identification packet must be alone on the stream start
+                // page
                 if (
                     self.pages.flags != 2
                         or self.pages.count != 1
@@ -410,8 +418,7 @@ fn loadOpusPage(self: *Self) Error!bool {
                 }
             } else {
                 try parseOpusTags(packet.bytes);
-                // the comment packet must finish its page with no following
-                // data.
+                // comment packet must end its page
                 if (
                     self.pages.hasPacket()
                         or self.pages.hasPartialPacket()
@@ -420,7 +427,7 @@ fn loadOpusPage(self: *Self) Error!bool {
                     return error.InvalidData;
                 }
                 // discard a leading broadcast fragment before establishing the
-                // origin.
+                // origin
                 self.pages.allowMissingPacketStart = true;
             }
             self.headers += 1;
@@ -434,6 +441,7 @@ fn loadOpusPage(self: *Self) Error!bool {
             }
             continue;
         }
+        // sum untrimmed durations before checking page end granule
         var page_samples: u64 = 0;
         for (self.pages.packetCursor..self.pages.count) |packet_index| {
             self.durations[packet_index] = try opusDuration(
@@ -443,7 +451,7 @@ fn loadOpusPage(self: *Self) Error!bool {
         }
         const granule: u64 = @intCast(self.pages.granule);
         if (self.first_audio) {
-            // cropped streams may start at a nonzero granule origin.
+            // cropped streams may start at a nonzero granule origin
             self.origin = if (granule >= page_samples)
                 granule - page_samples
             else if (self.pages.ended)
@@ -452,7 +460,7 @@ fn loadOpusPage(self: *Self) Error!bool {
                 return error.InvalidData;
             self.frame = self.origin;
             self.first_audio = false;
-            // offset presentation bounds by the stream's granule origin.
+            // offset presentation bounds by the stream granule origin
             self.presentation.start = std.math.add(
                 u64,
                 self.origin,
@@ -462,6 +470,7 @@ fn loadOpusPage(self: *Self) Error!bool {
         }
         const page_end = std.math.add(u64, self.frame, page_samples)
             catch return error.InvalidData;
+        // final granule may trim current page, cannot extend beyond decoded samples
         if (self.pages.ended) {
             if (
                 granule > page_end
@@ -482,7 +491,7 @@ fn loadOpusPage(self: *Self) Error!bool {
     return false;
 }
 
-/// read headers before audio; use codec block sizes to calculate timing.
+/// read headers before audio; use codec block sizes to calculate timing
 fn loadVorbisPage(self: *Self) Error!bool {
     if (!codec_options.vorbis) return error.UnsupportedEncoding;
     while (try self.pages.nextPage()) {
@@ -505,6 +514,7 @@ fn loadVorbisPage(self: *Self) Error!bool {
                 return error.InvalidData;
             continue;
         }
+        // sum untrimmed durations before checking page end granule
         var page_samples: u64 = 0;
         for (self.pages.packetCursor..self.pages.count) |packet_index| {
             const block_size = try self.vorbis_headers.?.blockSize(
@@ -513,15 +523,15 @@ fn loadVorbisPage(self: *Self) Error!bool {
             self.durations[packet_index] = 0;
             if (self.previous_block != 0) {
                 // each adjacent block contributes a quarter of its size to
-                // output.
+                // output
                 self.durations[packet_index] = self.previous_block / 4
                     + block_size / 4;
             }
-            // the first packet saves overlap without producing samples.
+            // first packet primes overlap for subsequent output
             self.previous_block = block_size;
             page_samples += self.durations[packet_index];
         }
-        // save a lone overlap packet until initial timing is known.
+        // save a lone overlap packet until initial timing is known
         if (self.first_audio and page_samples == 0 and !self.pages.ended) {
             if (
                 self.initial_prime.len != 0
@@ -537,9 +547,8 @@ fn loadVorbisPage(self: *Self) Error!bool {
         }
         const wire: i128 = self.pages.granule;
         if (self.first_audio) {
-            // an initial end page trims the tail. otherwise a short granule
-            // trims
-            // the start; a larger one supplies a broadcast offset.
+            // initial end page trims tail, otherwise short granule trims start
+            // larger granule supplies broadcast offset
             self.granule_shift = if (self.pages.ended)
                 @min(0, @as(i128, page_samples) - wire)
             else
@@ -552,7 +561,7 @@ fn loadVorbisPage(self: *Self) Error!bool {
             else
                 0;
             if (self.presentation.start != 0) {
-                // leading trimming cannot exceed the first overlap span.
+                // leading trimming cannot exceed the first overlap span
                 var span: u16 = 0;
                 for (self.pages.packetCursor..self.pages.count) |packet_index| {
                     if (self.durations[packet_index] != 0) {
@@ -569,14 +578,16 @@ fn loadVorbisPage(self: *Self) Error!bool {
                 and page_samples == 0
                 and !self.pages.ended
         ) {
-            // a standalone first overlap page keeps granule zero after seeking,
-            // regardless of the later timeline offset.
+            // a standalone first overlap page keeps granule zero after seeking
+            // regardless of the later timeline offset
             return true;
         }
         const page_end = std.math.add(u64, self.frame, page_samples)
             catch return error.InvalidData;
+        // translate signed wire timeline into nonnegative decode positions
         const granule = std.math.cast(u64, wire + self.granule_shift)
             orelse return error.InvalidData;
+        // final granule may trim current page, cannot extend beyond decoded samples
         if (self.pages.ended) {
             if (
                 granule > page_end
@@ -596,23 +607,16 @@ fn loadVorbisPage(self: *Self) Error!bool {
     return false;
 }
 
+/// seek with preceding overlap packet, return origin of first produced samples
 fn seekVorbis(self: *Self, target: u64) Error!PacketSource.SeekResult {
     const entries = self.index.entries.items;
-    if (entries.len == 0) return error.InvalidState;
-    // include the preceding packet to restore overlap before the target.
-    // at zero, keep the first packet even when two entries share frame zero.
-    var low: usize = 0;
-    var high = entries.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (entries[mid].frame <= target) low = mid + 1 else high = mid;
-    }
-    const selected = low -| 1;
+    // include the preceding packet to restore overlap before the target
+    // at zero, keep the first packet even when two entries share frame zero
+    const selected = self.index.indexAtOrBefore(target)
+        orelse return error.InvalidState;
+    // last packet at or before target, preceding packet restores overlap
     const prime = selected -| 1;
-    const anchor = if (selected == 0)
-        entries[0].frame
-    else
-        entries[selected].frame;
+    const anchor = entries[selected].frame;
     try self.pages.seek(entries[prime].location);
     self.frame = anchor;
     self.previous_block = 0;

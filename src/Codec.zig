@@ -1,4 +1,4 @@
-//! decode packets into pcm; select codecs and adapt byte streams.
+//! decode packets into pcm; select codecs and adapt byte streams
 const std = @import("std");
 const types = @import("types.zig");
 const pcm = @import("codecs/pcm.zig");
@@ -10,9 +10,10 @@ pub const Error = types.Error;
 
 backend: Backend,
 scheme: types.InputScheme,
-/// decoding history needed before a seek target, in frames.
+/// decoding history needed before a seek target, in frames
 preroll_frames: u64 = 0,
 
+/// owned adapters selected by enabled codec backends
 const Backend = union(enum) {
     pcm: *UnitAdapter(pcm),
     opus: if (opus_enabled) *UnitAdapter(@import("codecs/opus.zig")) else void,
@@ -22,7 +23,7 @@ const Backend = union(enum) {
         void,
 };
 
-/// open a codec with owned state and sample storage.
+/// open a codec with owned state and sample storage
 pub fn init(
     allocator: std.mem.Allocator,
     scheme: types.DecodingScheme,
@@ -48,9 +49,9 @@ pub fn init(
     };
 }
 
-/// consume or copy packet bytes before accepting them.
+/// consume or copy packet bytes before accepting them
 pub fn submit(self: *Codec, packet: types.Packet) Error!types.Submit {
-    // inline dispatch preserves each adapter type.
+    // inline dispatch preserves each adapter type
     return switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) == void)
                 error.InvalidState
@@ -59,7 +60,7 @@ pub fn submit(self: *Codec, packet: types.Packet) Error!types.Submit {
     };
 }
 
-/// borrow output until the next codec operation.
+/// borrow output until the next codec operation
 pub fn receive(self: *Codec) Error!types.Receive {
     return switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) == void)
@@ -69,7 +70,7 @@ pub fn receive(self: *Codec) Error!types.Receive {
     };
 }
 
-/// end input and drain delayed output.
+/// end input and drain delayed output
 pub fn finish(self: *Codec) Error!void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) != void) {
@@ -78,7 +79,7 @@ pub fn finish(self: *Codec) Error!void {
     }
 }
 
-/// clear output and history; keep configuration.
+/// clear output and history; keep configuration
 pub fn reset(self: *Codec) void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) != void) {
@@ -87,7 +88,7 @@ pub fn reset(self: *Codec) void {
     }
 }
 
-/// free codec state and sample storage.
+/// free codec state and sample storage
 pub fn deinit(self: *Codec) void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) != void) {
@@ -97,7 +98,7 @@ pub fn deinit(self: *Codec) void {
     self.* = undefined;
 }
 
-/// adapt a synchronous codec to packet submission and sample output.
+/// adapt a synchronous codec to packet submission and sample output
 pub fn UnitAdapter(comptime Unit: type) type {
     return struct {
         const Self = @This();
@@ -108,13 +109,11 @@ pub fn UnitAdapter(comptime Unit: type) type {
         max_frames_per_unit: u32,
         options: types.Options,
         output: []f32 = &.{},
+        // borrowed view into owned output, blocks next submit until received
         pending: ?types.AudioBlock = null,
         draining: bool = false,
 
-        /// allocate adapter state and output for one packet or a buffer of
-        /// units.
-        /// unit ownership transfers only on success; oversized input is
-        /// rejected.
+        /// allocate adapter and bounded output, take unit ownership on success
         pub fn init(
             allocator: std.mem.Allocator,
             unit: Unit,
@@ -130,12 +129,14 @@ pub fn UnitAdapter(comptime Unit: type) type {
             ) {
                 return error.InvalidData;
             }
+            // packet codecs use one unit, fixed units may share one submission
             var units: usize = 1;
             if (scheme.unitBytes()) |size| {
                 if (size == 0) return error.InvalidData;
                 if (size > options.bufferCapacity()) return error.LimitExceeded;
                 units = options.bufferCapacity() / size;
             }
+            // reserve maximum pcm output for all buffered units
             const frames = std.math.mul(usize, units, max_frames_per_unit)
                 catch return error.LimitExceeded;
             const capacity = std.math.mul(usize, frames, format.channels)
@@ -155,7 +156,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             return self;
         }
 
-        /// transfer adapter ownership; the backend tag must match its type.
+        /// transfer adapter ownership; the backend tag must match its type
         pub fn interface(
             self: *Self,
             comptime backend: std.meta.Tag(Backend),
@@ -167,18 +168,22 @@ pub fn UnitAdapter(comptime Unit: type) type {
             };
         }
 
+        /// decode synchronously when pending output cleared, borrow packet bytes during call
         fn submit(self: *Self, packet: types.Packet) Error!types.Submit {
             if (self.draining) return error.InvalidState;
+            // caller must receive output before next decode can overwrite storage
             if (self.pending != null) return .receive_output_first;
             if (packet.bytes.len > self.options.max_payload_bytes) {
                 return error.LimitExceeded;
             }
             if (packet.bytes.len == 0) return error.InvalidData;
+            // packet codecs use one unit, fixed units may share one submission
             var units: usize = 1;
             if (self.scheme.unitBytes()) |size| {
                 if (packet.bytes.len % size != 0) return error.InvalidData;
                 units = packet.bytes.len / size;
             }
+            // check output bound before decoding untrusted input
             const max_frames = std.math.mul(
                 usize,
                 units,
@@ -199,6 +204,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             if (frames > capacity / self.format.channels) {
                 return error.InvalidState;
             }
+            // retain output view and timestamp until receive
             self.pending = .{
                 .samples = self.output[0..frames * self.format.channels],
                 .format = self.format,
@@ -207,6 +213,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             return .accepted;
         }
 
+        /// take pending output once, otherwise request input or report drained
         fn receive(self: *Self) Error!types.Receive {
             if (self.pending) |block| {
                 self.pending = null;
@@ -215,16 +222,19 @@ pub fn UnitAdapter(comptime Unit: type) type {
             return if (self.draining) .finished else .need_input;
         }
 
+        /// stop accepting input, leave pending output available
         fn finish(self: *Self) Error!void {
             self.draining = true;
         }
 
+        /// discard pending output and decoding history
         fn reset(self: *Self) void {
             self.pending = null;
             self.draining = false;
             self.unit.reset();
         }
 
+        /// free unit state, output storage and adapter
         fn deinit(self: *Self) void {
             const allocator = self.allocator;
             if (@hasDecl(Unit, "deinit")) self.unit.deinit();
@@ -234,56 +244,57 @@ pub fn UnitAdapter(comptime Unit: type) type {
     };
 }
 
-/// gather complete units from a byte stream; packet sources bypass this.
+/// gather complete units from a byte stream; packet sources bypass this
 pub const Framer = struct {
     allocator: std.mem.Allocator,
     scheme: types.InputScheme,
     buffer: []u8 = &.{},
     length: usize = 0,
+    // bytes already returned, discarded during next compact
     consumed: usize = 0,
     eof: bool = false,
     finished: bool = false,
 
-    /// allocate the configured buffer; reject packet framing.
+    /// allocate the configured buffer; reject packet framing
     pub fn init(
         allocator: std.mem.Allocator,
         scheme: types.InputScheme,
         options: types.Options,
     ) Error!Framer {
-        if (scheme == .packets) return error.InvalidData;
-        if (scheme.unitBytes()) |unit| {
-            if (unit == 0) return error.InvalidData;
-            if (unit > options.bufferCapacity()) return error.LimitExceeded;
-        }
-        if (options.bufferCapacity() == 0) return error.LimitExceeded;
+        const unit = scheme.unitBytes() orelse return error.InvalidData;
+        if (unit == 0) return error.InvalidData;
+        if (unit > options.bufferCapacity()) return error.LimitExceeded;
         const buffer = try allocator.alloc(u8, options.bufferCapacity());
         return .{ .allocator = allocator, .scheme = scheme, .buffer = buffer };
     }
 
-    /// borrow the next unit until the next call; null means end of input.
-    /// the reader must stop before any trailing container metadata.
+    /// borrow complete units until next call, null means end of input
+    /// the reader must stop before any trailing container metadata
     pub fn next(self: *Framer, reader: *std.Io.Reader) Error!?[]const u8 {
         if (self.finished) return null;
         self.compact();
+        const unit = self.scheme.unitBytes().?;
         while (true) {
-            const unit = self.scheme.unitBytes().?;
+            // emit complete units together, retain trailing partial bytes
             const complete_bytes = self.length - self.length % unit;
             if (complete_bytes != 0) {
                 self.consumed = complete_bytes;
                 return self.buffer[0..complete_bytes];
             }
+            // reject a partial final unit at eof
             if (self.eof) {
                 if (self.length != 0) return error.TruncatedData;
                 self.finished = true;
                 return null;
             }
-            if (self.length == self.buffer.len) return error.LimitExceeded;
+            // remaining partial unit is smaller than the buffer validated during init
             const count = try reader.readSliceShort(self.buffer[self.length..]);
             if (count == 0) self.eof = true;
             self.length += count;
         }
     }
 
+    /// discard emitted bytes while retaining incomplete final unit
     fn compact(self: *Framer) void {
         if (self.consumed != 0) {
             std.mem.copyForwards(
@@ -296,7 +307,7 @@ pub const Framer = struct {
         }
     }
 
-    /// discard buffered bytes after seeking.
+    /// discard buffered bytes after seeking
     pub fn reset(self: *Framer) void {
         self.length = 0;
         self.consumed = 0;
@@ -304,7 +315,7 @@ pub const Framer = struct {
         self.finished = false;
     }
 
-    /// free the input buffer.
+    /// free the input buffer
     pub fn deinit(self: *Framer) void {
         self.allocator.free(self.buffer);
         self.* = undefined;

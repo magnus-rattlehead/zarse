@@ -1,4 +1,4 @@
-//! parse riff/rifx, rf64/bw64, and wave64 with a shared chunk walker.
+//! parse riff, rifx, rf64, bw64, and wave64 with a shared chunk walker
 const std = @import("std");
 const types = @import("../../types.zig");
 const Source = @import("../../Source.zig");
@@ -6,18 +6,19 @@ const declarations = @This();
 pub const Error = types.ParserError;
 pub const ParseError = types.ParserError;
 
-/// store a fourcc header with resolved payload size.
+/// store a fourcc header with resolved payload size
 pub const ChunkHeader = struct {
     id: [4]u8,
-    /// payload bytes, excluding header and padding.
+    /// payload bytes, excluding header and padding
     size: u64,
 };
 
-/// fill output or report truncated input.
+/// fill output or report truncated input
 pub fn readRequired(source: Source, out: []u8) ParseError!void {
     return readExact(source.reader, out);
 }
 
+/// fill output, map physical eof to truncated data
 fn readExact(
     reader: *std.Io.Reader,
     out: []u8,
@@ -29,39 +30,42 @@ fn readExact(
         };
 }
 
+/// outer riff chunk size and form identifier
 pub const RiffHeader = struct {
     chunk: ChunkHeader, // riff, rifx, rf64 or bw64; resolved file size minus 8
-    format: [4]u8, // form type; interpreted by the caller.
+    format: [4]u8, // form type; interpreted by the caller
 
-    /// rifx is big-endian; other variants are little-endian.
+    /// rifx is big endian; other variants are little endian
     pub fn byteOrder(self: RiffHeader) std.builtin.Endian {
         return if (std.mem.eql(u8, &self.chunk.id, "RIFX")) .big else .little;
     }
 };
 
+/// rf64 or bw64 size overrides and borrowed ordered size table
 pub const DataSize64 = struct {
     riff_size: u64,
     data_size: u64,
-    /// rf64 samples per channel; zero is unspecified, null for bw64.
+    /// rf64 samples per channel; zero is unspecified, null for bw64
     sample_count: ?u64,
-    /// borrow 12-byte entries: fourcc then little-endian u64.
+    /// borrow 12 byte entries, fourcc then little endian u64
     table: types.DataRange,
 };
 
+/// resolved chunk payload and next aligned header offset
 pub const Chunk = struct {
     header: ChunkHeader,
     data: types.DataRange,
     next_offset: u64,
 };
 
-/// read a header within the exclusive end bound; leave input at its payload.
+/// read a header within the exclusive end bound; leave input at its payload
 pub fn readHeader(
     source: Source,
     offset: u64,
     end: u64,
     byte_order: std.builtin.Endian,
 ) Error!ChunkHeader {
-    // 8 bytes: fourcc plus u32 payload size.
+    // 8 bytes, fourcc plus u32 payload size
     if (offset > end or end - offset < 8) return error.InvalidData;
     try source.seekTo(offset);
     var bytes: [8]u8 = undefined;
@@ -72,22 +76,22 @@ pub fn readHeader(
     };
 }
 
-/// resolve chunk offsets and padding within end.
-/// header size must already include any ds64 override.
+/// resolve chunk offsets and padding within end
+/// header size must already include any ds64 override
 pub fn frame(
     header: ChunkHeader,
     offset: u64,
     end: u64,
     kind: types.Format,
 ) Error!Chunk {
-    // riff uses fourcc/u32; wave64 uses guid/u64 with inclusive size.
+    // riff uses fourcc and u32; wave64 uses guid and u64 with inclusive size
     const header_size: u64 = if (kind == .wave64) 24 else 8;
     if (offset > end or end - offset < header_size) return error.InvalidData;
     const payload_offset = offset + header_size;
     if (header.size > end - payload_offset) return error.InvalidData;
     const payload_end = payload_offset + header.size;
     // wave64 data uses its declared size; other chunks align to eight bytes
-    // with optional final padding. riff pads odd payload lengths.
+    // with optional final padding; riff pads odd payload lengths
     const padding = if (kind == .wave64)
         (if (std.mem.eql(u8, &header.id, "data"))
             0
@@ -103,7 +107,7 @@ pub fn frame(
     };
 }
 
-/// preserve known and unknown wave encoding tags.
+/// preserve known and unknown wave encoding tags
 pub const FormatTag = enum(u16) {
     pcm = 0x0001,
     ieee_float = 0x0003,
@@ -113,24 +117,24 @@ pub const FormatTag = enum(u16) {
     _,
 };
 
-/// store parsed format fields and borrowed extension ranges.
+/// store parsed format fields and borrowed extension ranges
 pub const FormatChunk = struct {
-    chunk: ChunkHeader, // id = "fmt "
+    chunk: ChunkHeader, // fmt chunk identifier
     audio_format: FormatTag,
     channels: u16,
     sample_rate: u32,
-    /// average encoded bytes per second.
+    /// average encoded bytes per second
     byte_rate: u32,
-    /// encoded bytes per block.
+    /// encoded bytes per block
     block_align: u16,
-    /// declared bits per sample; encoding determines meaning.
+    /// declared bits per sample; encoding determines meaning
     bits_per_sample: u16,
-    /// extra format data, or null if absent.
+    /// extra format data, or null if absent
     extension: ?FormatExtension = null,
     byte_order: std.builtin.Endian = .little,
 
-    /// resolve standard subtypes; preserve unknown tags.
-    /// return null for custom or missing subtypes.
+    /// resolve standard subtypes; preserve unknown tags
+    /// return null for custom or missing subtypes
     pub fn encoding(self: FormatChunk) ?FormatTag {
         if (self.audio_format != .extensible) return self.audio_format;
         const extension = self.extension orelse return null;
@@ -138,8 +142,9 @@ pub const FormatChunk = struct {
             .extensible => |ext| ext,
             .codec => return null,
         };
+        // recognize standard wave subtype namespace before interpreting embedded tag
         const guid = ext.sub_format;
-        // guid fields: data2 (4..6), data3 (6..8), data4 (8..16).
+        // guid fields, data2 at byte 4, data3 at byte 6, data4 at byte 8
         if (
             std.mem.readInt(u16, guid[4..6], self.byte_order) != 0
                 or std.mem.readInt(u16, guid[6..8], self.byte_order) != 0x0010
@@ -155,7 +160,7 @@ pub const FormatChunk = struct {
         return @enumFromInt(@as(u16, @intCast(tag)));
     }
 
-    /// check whether block_align describes one decoded frame.
+    /// check whether block_align describes one decoded frame
     pub fn fixedWidth(self: FormatChunk) bool {
         const tag = self.encoding();
         return tag == .pcm
@@ -164,8 +169,8 @@ pub const FormatChunk = struct {
             or tag == .mulaw;
     }
 
-    /// select decoding for a validated format and byte order.
-    /// return unsupported for unknown encodings or sample layouts.
+    /// select decoding for a validated format and byte order
+    /// return unsupported for unknown encodings or sample layouts
     pub fn decodingScheme(
         fmt: FormatChunk,
         byte_order: std.builtin.Endian,
@@ -178,7 +183,9 @@ pub const FormatChunk = struct {
             else => return .unsupported,
         }
 
+        // derive physical sample width from complete interleaved frame size
         const container_bits = @as(u32, fmt.block_align / fmt.channels) * 8;
+        // extensible format separates stored width from significant bits
         var valid_bits = fmt.bits_per_sample;
         if (fmt.audio_format == .extensible) {
             valid_bits = fmt
@@ -191,7 +198,7 @@ pub const FormatChunk = struct {
             container_bits != (@as(u32, fmt.bits_per_sample) + 7) / 8 * 8
         ) {
             // wider pcm containers may hide mislabeled floats; reject
-            // ambiguity.
+            // ambiguity
             return .unsupported;
         }
         const sample_type: types.PcmSampleType = if (tag == .ieee_float)
@@ -219,32 +226,32 @@ pub const FormatChunk = struct {
     }
 };
 
-/// store extra format data after the base fields.
+/// store extra format data after the base fields
 pub const FormatExtension = struct {
-    /// extension bytes, excluding the size field.
+    /// extension bytes, excluding the size field
     size: u16,
     payload: union(enum) {
-        /// borrow codec data, possibly empty.
+        /// borrow codec data, possibly empty
         codec: types.DataRange,
-        /// store extensible-format fields.
+        /// store extensible format fields
         extensible: ExtensibleFormat,
     },
 };
 
-/// describe the extensible sample layout and subtype.
+/// describe the extensible sample layout and subtype
 pub const ExtensibleFormat = struct {
-    /// significant bits within the sample storage width.
+    /// significant bits within the sample storage width
     valid_bits_per_sample: u16,
-    /// speaker positions; zero means unspecified.
+    /// speaker positions; zero means unspecified
     channel_mask: u32,
-    /// subtype guid in file byte order; resolve through the encoding helper.
+    /// subtype guid in file byte order; resolve through the encoding helper
     sub_format: [16]u8,
-    /// borrow trailing extension data, possibly empty.
+    /// borrow trailing extension data, possibly empty
     extra_data: types.DataRange = .{},
 };
 
-/// parse a format payload; leave input within it.
-/// keep input unchanged for borrowed ranges.
+/// parse a format payload; leave input within it
+/// keep input unchanged for borrowed ranges
 pub fn parseFormat(
     source: Source,
     data: types.DataRange,
@@ -253,7 +260,7 @@ pub fn parseFormat(
     return parseFormatPayload(source, data, byte_order, false);
 }
 
-/// parse little-endian wave64 format fields with alignment padding.
+/// parse little endian wave64 format fields with alignment padding
 pub fn parseWave64Format(
     source: Source,
     data: types.DataRange,
@@ -261,7 +268,7 @@ pub fn parseWave64Format(
     return parseFormatPayload(source, data, .little, true);
 }
 
-/// validate format fields; padded allows trailing eight-byte alignment.
+/// validate format fields; padded allows trailing eight byte alignment
 fn parseFormatPayload(
     source: Source,
     data: types.DataRange,
@@ -271,7 +278,8 @@ fn parseFormatPayload(
     const chunk = ChunkHeader{ .id = "fmt ".*, .size = data.length };
     const offset = data.offset;
     _ = try data.end();
-    if (chunk.size < 16) return error.InvalidData; // 16 = base fmt fields.
+    if (chunk.size < 16)
+        return error.InvalidData; // 16 bytes for base fmt fields
     try source.seekTo(offset);
     var bytes: [40]u8 = undefined;
     try readRequired(source, bytes[0..16]);
@@ -296,22 +304,22 @@ fn parseFormatPayload(
         return error.InvalidData;
     }
     if (chunk.size != 16) {
-        // 18 = base fmt fields + 16-bit extension size.
+        // 18 bytes for base fmt fields and 16 bit extension size
         if (chunk.size < 18) return error.InvalidData;
         try readRequired(source, bytes[16..18]);
         const size = std.mem.readInt(u16, bytes[16..18], byte_order);
         const format_size = @as(u64, size) + 18;
         if (format_size > chunk.size) return error.InvalidData;
-        // allow up to seven bytes of wave64 alignment padding.
+        // allow up to seven bytes of wave64 alignment padding
         if (
             format_size != chunk.size
                 and (!padded or chunk.size != (format_size + 7) & ~@as(u64, 7))
         )
             return error.InvalidData;
         if (fmt.audio_format == .extensible) {
-            // 22 bytes: valid bits (2), channel mask (4), guid (16).
+            // 22 bytes, valid bits 2 bytes, channel mask 4 bytes, guid 16 bytes
             if (size < 22) return error.InvalidData;
-            // 18..40 holds the fixed extensible-format fields.
+            // fixed extensible fields occupy 22 bytes starting at byte 18
             try readRequired(source, bytes[18..40]);
             fmt.extension = .{
                 .size = size,
@@ -352,12 +360,13 @@ fn parseFormatPayload(
         return error.InvalidData;
     }
 
-    // validate sample layout for known encodings.
+    // validate sample layout for known encodings
     const encoding = fmt.encoding();
     if (fmt.fixedWidth()) {
         if (fmt.bits_per_sample == 0 or fmt.block_align % fmt.channels != 0) {
             return error.InvalidData;
         }
+        // derive physical sample width from complete interleaved frame size
         const container_bits = @as(u32, fmt.block_align / fmt.channels) * 8;
         if (fmt.audio_format == .extensible) {
             const valid_bits = fmt
@@ -376,7 +385,7 @@ fn parseFormatPayload(
         } else if (fmt.bits_per_sample > container_bits) {
             return error.InvalidData;
         }
-        // allow legacy pcm precision below the storage width.
+        // allow legacy pcm precision below the storage width
         if (encoding == .ieee_float) {
             if (
                 (fmt.bits_per_sample != 32 and fmt.bits_per_sample != 64)
@@ -389,6 +398,7 @@ fn parseFormatPayload(
                 return error.InvalidData;
             }
         }
+        // fixed width byte rate must agree with sample rate and frame size
         if (@as(u64, fmt.sample_rate) * fmt.block_align != fmt.byte_rate) {
             return error.InvalidData;
         }
@@ -396,13 +406,13 @@ fn parseFormatPayload(
     return fmt;
 }
 
-/// iterate data and silence chunks in a wavl list.
+/// iterate data and silence chunks in a wavl list
 pub const SegmentList = struct {
-    /// child chunks, excluding the list header and wavl identifier.
+    /// child chunks, excluding the list header and wavl identifier
     children: types.DataRange,
     byte_order: std.builtin.Endian,
 
-    /// iterate segments; keep source contents unchanged.
+    /// iterate segments; keep source contents unchanged
     pub fn iterate(self: SegmentList, source: Source) SegmentIterator {
         return .{
             .source = source,
@@ -412,13 +422,14 @@ pub const SegmentList = struct {
     }
 };
 
+/// seekable cursor through borrowed wavl children
 pub const SegmentIterator = struct {
     source: Source,
     list: SegmentList,
     offset: u64,
 
-    /// return data or silence, skipping other chunks; null ends the list.
-    /// iteration repositions input.
+    /// return data or silence, skipping other chunks; null ends the list
+    /// iteration repositions input
     pub fn next(self: *SegmentIterator) ParseError!?types.Segment {
         const end = try self.list.children.end();
         while (self.offset != end) {
@@ -429,12 +440,13 @@ pub const SegmentIterator = struct {
                 self.list.byte_order,
             );
             const chunk = try frame(header, self.offset, end, .wav);
+            // advance past payload and alignment even when chunk ignored
             self.offset = chunk.next_offset;
             if (std.mem.eql(u8, &header.id, "data")) {
                 return .{ .data = chunk.data };
             }
             if (std.mem.eql(u8, &header.id, "slnt")) {
-                // 4 = 32-bit frame count.
+                // four bytes for 32 bit frame count
                 if (header.size != 4) return error.InvalidData;
                 var count: [4]u8 = undefined;
                 try readRequired(self.source, &count);
@@ -447,10 +459,11 @@ pub const SegmentIterator = struct {
                 };
             }
             if (std.mem.eql(u8, &header.id, "LIST")) {
-                // 4 bytes hold the list type.
+                // 4 bytes hold the list type
                 if (header.size < 4) return error.InvalidData;
                 var kind: [4]u8 = undefined;
                 try readRequired(self.source, &kind);
+                // nested audio lists unsupported
                 if (std.mem.eql(u8, &kind, "wavl")) {
                     return error.UnsupportedChunkLayout;
                 }
@@ -460,29 +473,33 @@ pub const SegmentIterator = struct {
     }
 };
 
-/// share chunk walking between metadata scans and sequential playback.
-/// scans borrow ranges; streaming retains format and size-table bytes.
+/// share chunk walking between metadata scans and sequential playback
+/// scans borrow ranges; streaming retains format and size table bytes
 pub fn Reader(comptime streaming: bool) type {
     return struct {
         const Self = @This();
         const Allocator = if (streaming) std.mem.Allocator else void;
         const Options = if (streaming) types.Options else void;
         const ReadError = if (streaming) types.Error else types.ParserError;
+        /// declared decoded frame count paired with original chunk
         const Fact = struct { chunk: Chunk, frames: u64 };
 
         source: Source,
         allocator: Allocator,
         options: Options,
+        // absolute input cursor, detection already consumed first four bytes
         position: u64 = 4,
         end: u64 = 0,
+        // next outer or wavl child header, may lie beyond current audio payload
         next_offset: u64 = 0,
         kind: types.Format = .wav,
         byte_order: std.builtin.Endian = .little,
         header: RiffHeader = undefined,
         format: ?FormatChunk = null,
-        /// owned streaming format storage; seekable scans borrow ranges.
+        /// owned streaming format storage; seekable scans borrow ranges
         format_bytes: []u8 = &.{},
         table: []u8 = &.{},
+        // bytes consumed from ordered ds64 override table
         table_offset: u64 = 0,
         ds64: ?DataSize64 = null,
         fact: ?Fact = null,
@@ -490,12 +507,13 @@ pub fn Reader(comptime streaming: bool) type {
         layout: ?types.AudioData = null,
         first_data: ?u64 = null,
         wavl_end: ?u64 = null,
+        // outer chunk cursor restored after final wavl child
         wavl_next: u64 = 0,
         frames: u64 = 0,
         finished: bool = false,
 
-        /// open after the four-byte prefix. streaming allocates format storage
-        /// and the declared size table within configured limits.
+        /// open after the four byte prefix; streaming allocates format storage
+        /// and the declared size table within configured limits
         pub fn initPrefix(
             allocator: Allocator,
             source: Source,
@@ -516,6 +534,7 @@ pub fn Reader(comptime streaming: bool) type {
             }
             var bytes: [40]u8 = undefined;
             bytes[0..4].* = prefix;
+            // riff header includes form type, rf64 and bw64 require immediate ds64
             if (wav.probe(&prefix)) {
                 try self.read(bytes[4..12]);
                 if (!std.mem.eql(u8, bytes[8..12], "WAVE")) {
@@ -547,8 +566,8 @@ pub fn Reader(comptime streaming: bool) type {
                     var ds_header: [8]u8 = undefined;
                     try self.read(&ds_header);
                     const size = std.mem.readInt(u32, ds_header[4..8], .little);
-                    // ds64 begins with three u64 sizes/counts and a u32 table
-                    // count.
+                    // ds64 begins with three u64 sizes or counts and a u32 table
+                    // count
                     if (
                         !std.mem.eql(u8, ds_header[0..4], "ds64")
                             or size < 28
@@ -567,6 +586,7 @@ pub fn Reader(comptime streaming: bool) type {
                     }
                     var ds_bytes: [28]u8 = undefined;
                     try self.read(&ds_bytes);
+                    // each ds64 table entry contains fourcc and 64 bit payload size
                     const table_length = @as(
                         u64,
                         std.mem.readInt(u32, ds_bytes[24..28], .little),
@@ -603,6 +623,7 @@ pub fn Reader(comptime streaming: bool) type {
                         );
                         try self.read(self.table);
                     }
+                    // replace 32 bit placeholder with declared 64 bit riff size
                     self.header.chunk.size = self.ds64.?.riff_size;
                     self.next_offset = 20 + @as(u64, size) + (size & 1);
                 }
@@ -617,6 +638,7 @@ pub fn Reader(comptime streaming: bool) type {
                 ) {
                     return error.UnsupportedFormat;
                 }
+                // wave64 file size includes outer header
                 self.kind = .wave64;
                 self.end = std.mem.readInt(u64, bytes[16..24], .little);
                 if (self.end < 40) return error.InvalidData;
@@ -633,7 +655,7 @@ pub fn Reader(comptime streaming: bool) type {
             return self;
         }
 
-        /// free streaming metadata storage; leave input open.
+        /// free streaming metadata storage; leave input open
         pub fn deinit(self: *Self) void {
             if (streaming) {
                 self.allocator.free(self.table);
@@ -641,14 +663,17 @@ pub fn Reader(comptime streaming: bool) type {
             }
         }
 
+        /// read exactly requested bytes and advance absolute position
         pub fn read(self: *Self, out: []u8) ReadError!void {
             try readExact(self.source.reader, out);
             self.position = std.math.add(u64, self.position, out.len)
                 catch return error.InvalidData;
         }
 
+        /// seek scan input or discard forward bytes for sequential input
         fn moveTo(self: *Self, offset: u64) ReadError!void {
             if (streaming) {
+                // sequential reader cannot revisit bytes already consumed
                 if (offset < self.position) return error.InvalidState;
                 var scratch: [8192]u8 = undefined;
                 while (self.position < offset) {
@@ -666,7 +691,7 @@ pub fn Reader(comptime streaming: bool) type {
             }
         }
 
-        /// resolve chunk offsets and sizes for riff and wave64 headers.
+        /// resolve chunk offsets and sizes for riff and wave64 headers
         fn readChunk(self: *Self, end: u64) ReadError!Chunk {
             const offset = self.position;
             const header_size: usize = if (self.kind == .wave64) 24 else 8;
@@ -678,13 +703,13 @@ pub fn Reader(comptime streaming: bool) type {
             if (self.kind == .wave64) {
                 const size = std.mem.readInt(u64, bytes[16..24], .little);
                 if (size < 24) return error.InvalidData;
-                // only standard wave guids can be identified by fourcc.
+                // only standard wave guids can be identified by fourcc
                 const id: [4]u8 = if (
                     std.mem.eql(u8, bytes[4..16], wave64.data_guid[4..])
                 )
                     bytes[0..4].*
                 else .{ 0, 0, 0, 0 };
-                // convert inclusive wave64 sizes to payload lengths.
+                // convert inclusive wave64 sizes to payload lengths
                 return frame(
                     .{ .id = id, .size = size - 24 },
                     offset,
@@ -700,6 +725,7 @@ pub fn Reader(comptime streaming: bool) type {
                 if (std.mem.eql(u8, &header.id, "ds64")) {
                     return error.InvalidData;
                 }
+                // all ones marks ds64 override, first data has dedicated size
                 if (header.size == std.math.maxInt(u32)) {
                     if (
                         std.mem.eql(u8, &header.id, "data")
@@ -725,6 +751,7 @@ pub fn Reader(comptime streaming: bool) type {
                             try self.read(&entry);
                             try self.moveTo(offset + 8);
                         }
+                        // size table consumed in order, identifier must match current placeholder
                         if (!std.mem.eql(u8, &header.id, entry[0..4])) {
                             return error.InvalidData;
                         }
@@ -740,10 +767,11 @@ pub fn Reader(comptime streaming: bool) type {
             return frame(header, offset, end, .wav);
         }
 
-        /// walk metadata and return audio segments; leave input at their data.
+        /// walk metadata and return audio segments; leave input at their data
         pub fn next(self: *Self) ReadError!?types.Segment {
             if (self.finished) return null;
             while (true) {
+                // return to outer chunk walk after final audio list child
                 if (self.wavl_end) |end| {
                     if (self.next_offset == end) {
                         self.wavl_end = null;
@@ -758,7 +786,7 @@ pub fn Reader(comptime streaming: bool) type {
                             and self.audio_chunk != null
                             and end - self.next_offset < 24)
                 ) {
-                    // allow a short trailing wave64 header after data.
+                    // allow a short trailing wave64 header after data
                     if (self.next_offset == self.end) try self.moveTo(self.end);
                     try self.validateEnd();
                     self.finished = true;
@@ -781,6 +809,7 @@ pub fn Reader(comptime streaming: bool) type {
                             0..@intCast(chunk.data.length)
                         ];
                         try self.read(bytes);
+                        // reuse seekable format parser on retained streaming bytes
                         var reader = std.Io.Reader.fixed(bytes);
                         self.format = try parseFormatPayload(
                             Source.fromFixed(&reader),
@@ -800,6 +829,7 @@ pub fn Reader(comptime streaming: bool) type {
                     std.mem.eql(u8, &id, "fact")
                         and self.wavl_end == null
                 ) {
+                    // fact count uses 64 bits in wave64, 32 bits in riff
                     const size: usize = if (self.kind == .wave64) 8 else 4;
                     if (self.fact != null or chunk.data.length < size) {
                         return error.InvalidData;
@@ -824,6 +854,7 @@ pub fn Reader(comptime streaming: bool) type {
                             .{ .data = chunk.data },
                         );
                     }
+                    // remember first payload for restoring position after metadata scan
                     if (self.first_data == null) {
                         self.first_data = chunk.data.offset;
                     }
@@ -886,16 +917,17 @@ pub fn Reader(comptime streaming: bool) type {
             }
         }
 
-        /// resolve padding from the fact count or complete frames.
+        /// resolve padding from the fact count or complete frames
         pub fn wave64DataLength(self: *const Self) types.ValidationError!u64 {
             const chunk = self.audio_chunk.?;
             const alignment = self.format.?.block_align;
+            // prefer declared frame count, otherwise round payload down to whole frames
             const length = if (self.fact) |fact|
                 std.math.mul(u64, fact.frames, alignment)
                     catch return error.InvalidData
             else
                 chunk.data.length - chunk.data.length % alignment;
-            // wave64 data sizes may include seven padding bytes.
+            // wave64 data sizes may include seven padding bytes
             if (length > chunk.data.length or chunk.data.length - length > 7) {
                 return error.InvalidData;
             }
@@ -905,6 +937,7 @@ pub fn Reader(comptime streaming: bool) type {
             return length;
         }
 
+        /// require format and audio layout, reconcile final counts and wave64 padding
         fn validateEnd(self: *Self) types.ValidationError!void {
             const format = self.format orelse return error.InvalidData;
             if (self.audio_chunk == null) return error.InvalidData;
@@ -915,6 +948,7 @@ pub fn Reader(comptime streaming: bool) type {
                     self.frames = length / format.block_align;
                 }
             } else {
+                // non pcm or segmented riff needs declared count from fact or ds64
                 const segmented = self.layout.?.layout == .wavl;
                 if (
                     (format.encoding() != .pcm or segmented)
@@ -933,6 +967,7 @@ pub fn Reader(comptime streaming: bool) type {
             }
         }
 
+        /// expose validated scan as borrowed riff metadata and audio ranges
         fn wavFile(self: Self) wav.WavFile {
             return .{
                 .header = .{
@@ -958,6 +993,7 @@ pub fn Reader(comptime streaming: bool) type {
             };
         }
 
+        /// expose validated scan with inclusive wave64 sizes and borrowed audio ranges
         fn wave64File(self: Self) wave64.Wave64File {
             return .{
                 .header = .{
@@ -990,7 +1026,7 @@ pub fn Reader(comptime streaming: bool) type {
     };
 }
 
-/// scan metadata using the playback chunk walker.
+/// scan metadata using the playback chunk walker
 fn scan(
     source: Source,
     expected: ?types.Format,
@@ -1007,6 +1043,7 @@ fn scan(
     if (expected) |kind| {
         if (reader.kind != kind) return error.UnsupportedFormat;
     }
+    // scan every chunk so trailing metadata and count validation are included
     while (try reader.next()) |_| {}
     try source.seekTo(
         reader.first_data orelse reader.audio_chunk.?.data.offset,
@@ -1014,6 +1051,7 @@ fn scan(
     return reader;
 }
 
+/// scan wav or wave64 metadata, leave input at first audio data
 pub fn parse(source: Source) types.ParserError!types.ParsedAudio {
     const reader = try scan(source, null);
     return if (reader.kind == .wave64)
@@ -1022,10 +1060,13 @@ pub fn parse(source: Source) types.ParserError!types.ParsedAudio {
         reader.wavFile().audio();
 }
 
-/// expose riff metadata through the shared chunk walker.
+/// expose riff metadata through the shared chunk walker
 pub const wav = struct {
+    /// chunk identifier and declared size, header inclusion depends on container
     pub const ChunkHeader = declarations.ChunkHeader;
+    /// outer riff chunk size and form identifier
     pub const RiffHeader = declarations.RiffHeader;
+    /// rf64 or bw64 size overrides and borrowed ordered size table
     pub const DataSize64 = declarations.DataSize64;
     pub const FormatTag = declarations.FormatTag;
     pub const FormatChunk = declarations.FormatChunk;
@@ -1033,39 +1074,41 @@ pub const wav = struct {
     pub const ExtensibleFormat = declarations.ExtensibleFormat;
     pub const ParseError = declarations.ParseError;
     pub const SegmentList = declarations.SegmentList;
+    /// seekable cursor through borrowed wavl children
     pub const SegmentIterator = declarations.SegmentIterator;
     pub const parseFormat = declarations.parseFormat;
     pub const parseWave64Format = declarations.parseWave64Format;
 
+    /// declared decoded frames and borrowed trailing fact data
     pub const FactChunk = struct {
-        chunk: wav.ChunkHeader, // id = "fact"; size >= 4
-        /// decoded samples per channel, including compressed audio.
+        chunk: wav.ChunkHeader, // fact chunk identifier, payload at least four bytes
+        /// decoded samples per channel, including compressed audio
         sample_length: u32,
-        /// borrow bytes after the sample count, if any.
+        /// borrow bytes after the sample count, if any
         extra_data: types.DataRange = .{},
     };
 
-    /// collect wave metadata while walking chunks.
+    /// collect wave metadata while walking chunks
     pub const WavHeader = struct {
         riff: wav.RiffHeader,
         ds64: ?wav.DataSize64 = null,
         fmt: wav.FormatChunk,
-        /// declared decoded frame count; optional for pcm.
+        /// declared decoded frame count; optional for pcm
         fact: ?FactChunk = null,
-        // data or wavl list size, excluding header and padding.
+        // data or wavl list size, excluding header and padding
         data: wav.ChunkHeader,
-        /// byte offset of the audio chunk payload.
+        /// byte offset of the audio chunk payload
         data_offset: u64,
     };
 
-    /// store wave metadata and source ranges.
+    /// store wave metadata and source ranges
     pub const WavFile = struct {
         header: WavHeader,
         data: types.AudioData,
-        /// count fixed-width frames, including silence.
+        /// count fixed width frames, including silence
         decoded_frames: ?u64,
 
-        /// return metadata and encoding from a parsed file.
+        /// return metadata and encoding from a parsed file
         pub fn audio(self: WavFile) types.ParsedAudio {
             return .{
                 .info = .{
@@ -1081,9 +1124,11 @@ pub const wav = struct {
             };
         }
 
-        /// return total frames, or null if unknown; use a parsed file.
+        /// return total frames, or null if unknown; use a parsed file
         pub fn frameCount(self: WavFile) ?u64 {
+            // prefer measured fixed width frames over declared count
             if (self.decoded_frames) |frames| return frames;
+            // rf64 nonzero sample count takes priority over fact
             if (self.header.ds64) |ds64| {
                 if (ds64.sample_count) |count| {
                     if (count != 0) return count;
@@ -1101,12 +1146,12 @@ pub const wav = struct {
         }
     };
 
-    /// dispatch short recognized prefixes so parsing can report truncation.
-    pub const probe_size = 12; // 12 = chunk id + size + wave form type.
+    /// dispatch short recognized prefixes so parsing can report truncation
+    pub const probe_size = 12; // 12 bytes for chunk identifier, size and wave form type
 
-    /// recognize wave prefixes, including truncated headers.
+    /// recognize wave prefixes, including truncated headers
     pub fn probe(prefix: []const u8) bool {
-        if (prefix.len < 4) return false; // 4 = fourcc length.
+        if (prefix.len < 4) return false; // four bytes for fourcc
         const id = prefix[0..4];
         if (
             !std.mem.eql(u8, id, "RIFF")
@@ -1115,18 +1160,18 @@ pub const wav = struct {
                 and !std.mem.eql(u8, id, "BW64")
         )
             return false;
-        // 8..12 holds the wave form type.
+        // wave form type occupies four bytes starting at byte 8
         return prefix.len < probe_size
             or std.mem.eql(u8, prefix[8..12], "WAVE");
     }
 
-    /// validate headers and layout; leave input at the first audio data.
+    /// validate headers and layout; leave input at the first audio data
     pub fn parse(source: Source) wav.ParseError!WavFile {
         return (try scan(source, .wav)).wavFile();
     }
 };
 
-/// expose wave64 metadata with guid identifiers and inclusive sizes.
+/// expose wave64 metadata with guid identifiers and inclusive sizes
 pub const wave64 = struct {
     pub const ParseError = declarations.ParseError;
     pub const FormatChunk = declarations.FormatChunk;
@@ -1137,23 +1182,26 @@ pub const wave64 = struct {
     pub const fact_guid = guid("fact");
     pub const data_guid = guid("data");
 
-    /// build a wave64 guid from a four-character identifier.
+    /// build a wave64 guid from a four character identifier
     fn guid(comptime id: *const [4]u8) Guid {
         return (id.* ++ "\xf3\xac\xd3\x11\x8c\xd1\x00\xc0\x4f\x8e\xdb\x8a").*;
     }
 
+    /// chunk identifier and declared size, header inclusion depends on container
     pub const ChunkHeader = struct {
         id: Guid,
-        /// on-disk bytes, including the 24-byte header.
+        /// on disk bytes, including the 24 byte header
         size: u64,
     };
 
+    /// declared decoded frames and borrowed trailing fact data
     pub const FactChunk = struct {
         chunk: wave64.ChunkHeader,
         sample_length: u64,
         extra_data: types.DataRange,
     };
 
+    /// validated wave64 format and audio chunk metadata
     pub const Wave64Header = struct {
         riff: wave64.ChunkHeader,
         fmt: wave64.FormatChunk,
@@ -1162,19 +1210,21 @@ pub const wave64 = struct {
         data_offset: u64,
     };
 
+    /// wave64 metadata with borrowed audio ranges and optional decoded count
     pub const Wave64File = struct {
         header: Wave64Header,
-        /// borrow one data segment, trimmed to complete fixed-width frames.
+        /// borrow one data segment, trimmed to complete fixed width frames
         data: types.AudioData,
         decoded_frames: ?u64,
 
-        /// return total frames, or null if unknown; use a parsed file.
+        /// return total frames, or null if unknown; use a parsed file
         pub fn frameCount(self: Wave64File) ?u64 {
+            // prefer measured fixed width frames over declared count
             if (self.decoded_frames) |frames| return frames;
             return if (self.header.fact) |fact| fact.sample_length else null;
         }
 
-        /// return metadata and encoding from a parsed file.
+        /// return metadata and encoding from a parsed file
         pub fn audio(self: Wave64File) types.ParsedAudio {
             return .{
                 .info = .{
@@ -1189,19 +1239,20 @@ pub const wave64 = struct {
         }
     };
 
-    // 40 bytes: riff guid (16), size (8), wave guid (16).
+    // 40 bytes, riff guid 16 bytes, size 8 bytes, wave guid 16 bytes
     pub const probe_size = 40;
 
-    /// recognize wave64 prefixes, including truncated headers.
+    /// recognize wave64 prefixes, including truncated headers
     pub fn probe(prefix: []const u8) bool {
-        if (prefix.len < 4) return false; // 4 = "riff" prefix of the guid.
+        if (prefix.len < 4) return false; // four bytes for riff prefix of guid
+        // recognize available guid prefix so full parser can report truncation
         const riff_length = @min(prefix.len, 16);
         if (
             !std.mem.eql(u8, prefix[0..riff_length], riff_guid[0..riff_length])
         ) {
             return false;
         }
-        if (prefix.len <= 24) return true; // 24 = wave guid offset.
+        if (prefix.len <= 24) return true; // wave guid starts at byte 24
         const wave_length = @min(prefix.len - 24, 16);
         return std.mem.eql(
             u8,
@@ -1210,7 +1261,7 @@ pub const wave64 = struct {
         );
     }
 
-    /// validate headers and layout; leave input at the first audio data.
+    /// validate headers and layout; leave input at the first audio data
     pub fn parse(source: Source) wave64.ParseError!Wave64File {
         return (try scan(source, .wave64)).wave64File();
     }

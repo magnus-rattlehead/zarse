@@ -1,5 +1,5 @@
-//! read wav/wave64 audio segments, silence, and seek locations.
-//! riff.zig shares parsing between seekable and streaming input.
+//! read wav and wave64 audio segments, silence, and seek locations
+//! riff.zig shares parsing between seekable and streaming input
 const std = @import("std");
 const types = @import("../../types.zig");
 const Source = @import("../../Source.zig");
@@ -7,11 +7,12 @@ const PacketSource = @import("../../PacketSource.zig");
 const riff = @import("riff.zig");
 const Stream = riff.Reader(true);
 const SeekIndex = @import("../seek_index.zig").Index(SegmentLocation);
+/// cached wavl segment with resume cursor and held silence history
 const SegmentLocation = struct {
     segment: types.Segment,
-    /// next chunk position after this segment.
+    /// next chunk position after this segment
     next_offset: u64,
-    /// last data frame, or zero before any data; silence holds this value.
+    /// last data frame, or zero before any data; silence holds this value
     previous_frame: u64 = 0,
 };
 const Self = @This();
@@ -20,8 +21,8 @@ pub const Error = types.Error;
 pub const wav = riff.wav;
 pub const wave64 = riff.wave64;
 
-/// parse metadata and borrowed audio ranges; keep input unchanged.
-/// errors may leave input at any position.
+/// parse metadata and borrowed audio ranges; keep input unchanged
+/// errors may leave input at any position
 pub const parse = riff.parse;
 
 allocator: std.mem.Allocator,
@@ -30,38 +31,37 @@ options: types.Options,
 parsed: ?types.ParsedAudio = null,
 stream: ?Stream = null,
 segments: ?types.AudioData.Iterator = null,
-/// cached wavl segments; frame positions are set once frame size is known.
+/// cached wavl segments; frame positions are set once frame size is known
 index: SeekIndex = .{},
 metadata: types.Info = undefined,
 scheme: ?types.InputScheme = null,
-/// fixed input storage borrowed by packets.
+/// fixed input storage borrowed by packets
 buffer: []u8 = &.{},
 packet_capacity: usize = 0,
 current: ?types.Segment = null,
 segment_bytes: u64 = 0,
 frame: u64 = 0,
 
-/// recognize a four-byte prefix; validate full headers when opening.
+/// recognize a four byte prefix; validate full headers when opening
 pub fn probe(prefix: []const u8) bool {
     return wav.probe(prefix) or wave64.probe(prefix);
 }
 
-/// open borrowed input after detection consumed its four-byte prefix.
+/// open borrowed input after detection consumed its four byte prefix
 /// allocate buffers and any wavl index; parse ranges for seekable input
-/// or walk chunks incrementally for sequential input.
+/// or walk chunks incrementally for sequential input
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
     prefix: [4]u8,
     options: types.Options,
 ) Error!PacketSource {
-    const seekable = source.seek_to != null
-        and source.get_size != null
-        and try source.getSize() != null;
+    const seekable = source.seek_to != null and try source.getSize() != null;
     const state = try allocator.create(Self);
     state.* = .{ .allocator = allocator, .source = source, .options = options };
     errdefer state.deinit();
     state.buffer = try allocator.alloc(u8, options.bufferCapacity());
+    // seekable inputs scan metadata and cache segment layout before playback
     if (seekable) {
         state.parsed = try parse(source);
         state.segments = state.parsed.?.data.iterate(source);
@@ -69,6 +69,7 @@ pub fn init(
         try state.initIndex();
         return state.interface(state.parsed.?.scheme);
     }
+    // sequential inputs keep chunk walker at first audio segment
     state.stream = try Stream.initPrefix(allocator, source, options, prefix);
     state.current = try state.stream.?.next();
     const stream = &state.stream.?;
@@ -82,11 +83,13 @@ pub fn init(
     return state.interface(fmt.decodingScheme(stream.byte_order));
 }
 
+/// accept fixed units once, calculate packet capacity and seek frame positions
 pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
     if (self.scheme != null) return error.InvalidState;
     const unit = scheme.unitBytes() orelse return error.UnsupportedEncoding;
     if (unit == 0) return error.InvalidData;
     if (unit > self.buffer.len) return error.LimitExceeded;
+    // round buffer down to whole encoded units
     self.packet_capacity = self.buffer.len / unit * unit;
     if (self.parsed) |parsed| {
         if (scheme == .samples) {
@@ -95,6 +98,7 @@ pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
                 var previous: u64 = 0;
                 for (self.index.entries.items) |*entry| {
                     entry.frame = frames;
+                    // remember preceding data frame so seeks into silence can restore held value
                     entry.location.previous_frame = previous;
                     frames = std.math.add(
                         u64,
@@ -117,10 +121,12 @@ pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
     self.scheme = scheme;
 }
 
+/// borrow aligned audio packet, emit held silence or end, bytes expire on next read
 pub fn next(self: *Self) Error!PacketSource.Event {
     const scheme = self.scheme orelse return error.InvalidState;
     const unit = scheme.unitBytes().?;
     while (true) {
+        // fetch next segment only after current data or silence exhausted
         if (self.current == null) {
             self.current = if (self.stream) |*stream|
                 try stream.next()
@@ -136,6 +142,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
         }
         switch (self.current.?) {
             .silence => |frames| {
+                // held silence advances pcm timeline
                 self.current = null;
                 if (frames == 0) continue;
                 self.frame = std.math.add(u64, self.frame, frames)
@@ -153,7 +160,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 );
                 if (self.stream) |*stream| {
                     if (stream.kind == .wave64) {
-                        // retain final frames plus up to seven padding bytes.
+                        // retain final frames plus up to seven padding bytes
                         const tail = range.length
                             - (range.length
                                 - @min(range.length, @as(u64, unit) + 7))
@@ -172,6 +179,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                             if (try stream.next() != null) {
                                 return error.UnsupportedChunkLayout;
                             }
+                            // metadata now complete, separate actual audio bytes from trailing alignment
                             const length = try stream.wave64DataLength();
                             if (length < self.segment_bytes) {
                                 return error.InvalidData;
@@ -185,6 +193,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                         }
                     } else try stream.read(self.buffer[0..count]);
                 } else {
+                    // borrowed segment ranges may be separated by metadata chunks
                     try self.source.seekTo(range.offset + self.segment_bytes);
                     self.source.reader.readSliceAll(self.buffer[0..count])
                         catch |err| return switch (err) {
@@ -197,6 +206,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 if (self.segment_bytes == range.length) self.current = null;
                 if (count == 0) continue;
                 var packet = types.Packet{ .bytes = self.buffer[0..count] };
+                // sample units map directly to pcm frames, block durations left unknown
                 if (scheme == .samples) {
                     if (self.frame > std.math.maxInt(i64)) {
                         return error.InvalidData;
@@ -218,10 +228,12 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     }
 }
 
+/// return known stream metadata and untrimmed frame count
 pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
+/// seek at or before requested frame, replay prior data when silence needs history
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     const parsed = self.parsed orelse return error.Unseekable;
     const scheme = self.scheme orelse return error.InvalidState;
@@ -230,6 +242,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     self.segments = parsed.data.iterate(self.source);
     self.current = null;
     self.segment_bytes = 0;
+    // seeking exactly to end leaves iterator exhausted
     if (frame == self.metadata.total_frames.?) {
         switch (self.segments.?.state) {
             .single => |*segment| segment.* = null,
@@ -255,7 +268,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
                 orelse return error.InvalidState;
             if (entry.location.segment == .silence) {
                 // replay prior data to restore held silence; leading silence
-                // starts at zero.
+                // starts at zero
                 anchor = entry.location.previous_frame;
                 entry = self.index.atOrBefore(anchor)
                     orelse return error.InvalidState;
@@ -265,6 +278,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
             self.current = entry.location.segment;
         },
     }
+    // translate pcm anchor into byte cursor or remaining silence count
     const remaining = anchor - segment_frame;
     switch (self.current.?) {
         .data => |range| {
@@ -279,6 +293,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     };
 }
 
+/// free reader buffers and index, leave borrowed source open
 pub fn deinit(self: *Self) void {
     if (self.stream) |*stream| stream.deinit();
     self.index.deinit(self.allocator);
@@ -287,8 +302,8 @@ pub fn deinit(self: *Self) void {
     allocator.destroy(self);
 }
 
-/// open an unchanged parsed layout with seek and size support.
-/// allocate packet storage and any wavl index.
+/// open an unchanged parsed layout with seek and size support
+/// allocate packet storage and any wavl index
 pub fn initParsed(
     allocator: std.mem.Allocator,
     source: Source,
@@ -313,6 +328,7 @@ pub fn initParsed(
     return state.interface(parsed.scheme);
 }
 
+/// cache nonempty wavl segments within index budget, frame positions assigned later
 fn initIndex(self: *Self) Error!void {
     const layout = self.parsed.?.data.layout;
     if (layout != .wavl) return;
@@ -323,7 +339,7 @@ fn initIndex(self: *Self) Error!void {
         if (segment == .data and try segment.data.end() > size) {
             return error.TruncatedData;
         }
-        // empty segments add no samples or silence history.
+        // skip empty segments
         if (
             switch (segment) {
                 .data => |range| range.length == 0,
@@ -335,7 +351,7 @@ fn initIndex(self: *Self) Error!void {
             self.allocator,
             self.options.max_index_bytes,
             .{
-                // assigned during configuration, before seeking.
+                // assigned during configuration, before seeking
                 .frame = 0,
                 .location = .{
                     .segment = segment,
@@ -346,11 +362,13 @@ fn initIndex(self: *Self) Error!void {
     }
 }
 
+/// transfer reader ownership into packet source with parsed audio format
 fn interface(self: *Self, encoding: types.DecodingScheme) PacketSource {
     var format = types.AudioFormat{
         .channels = self.metadata.channels,
         .sample_rate = self.metadata.sample_rate,
     };
+    // streamed extensible format may supply explicit speaker mask
     if (self.stream) |stream| {
         if (stream.format.?.extension) |extension| {
             if (
