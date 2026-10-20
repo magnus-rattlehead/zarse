@@ -16,6 +16,7 @@ preroll_frames: u64 = 0,
 /// owned adapters selected by enabled codec backends
 const Backend = union(enum) {
     pcm: *UnitAdapter(pcm),
+    mp3: *UnitAdapter(@import("codecs/mp3.zig")),
     opus: if (opus_enabled) *UnitAdapter(@import("codecs/opus.zig")) else void,
     vorbis: if (vorbis_enabled)
         *UnitAdapter(@import("codecs/vorbis.zig"))
@@ -35,6 +36,7 @@ pub fn init(
     }
     return switch (scheme) {
         .pcm => |config| pcm.init(allocator, config, format, options),
+        .mp3 => @import("codecs/mp3.zig").init(allocator, format, options),
         .opus => |config| {
             if (!opus_enabled) return error.UnsupportedEncoding;
             return @import("codecs/opus.zig")

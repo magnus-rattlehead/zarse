@@ -42,7 +42,6 @@ const VbrTag = struct {
 };
 
 /// recognize id3v2 or possible layer iii header, full validation during init
-// reference: minimp3_ex.h:mp3dec_detect_buf.
 pub fn probe(prefix: []const u8) bool {
     if (prefix.len < 4) return false;
     if (std.mem.startsWith(u8, prefix, "ID3")) return true;
@@ -54,7 +53,6 @@ pub fn probe(prefix: []const u8) bool {
 
 /// open borrowed input after four byte prefix, retain first audio frame
 /// scan seekable input for frame positions, errors may advance input
-// reference: minimp3_ex.h:mp3dec_ex_open_cb.
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -142,7 +140,6 @@ pub fn init(
 }
 
 /// accept packet framing once, one encoded frame per packet
-// reference: minimp3_ex.h:mp3dec_iterate_cb.
 pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
     if (self.configured) return error.InvalidState;
     // encoded frame sizes can vary so fixed size schemes like .samples and .blocks are rejected
@@ -152,7 +149,6 @@ pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
 
 /// emit frame with untrimmed pcm timing, announce trim bounds before affected packets
 /// packet bytes borrow input buffer until next advancing operation
-// reference: minimp3_ex.h:mp3dec_iterate_cb, mp3dec_ex_read_frame.
 pub fn next(self: *Self) Error!PacketSource.Event {
     if (!self.configured) return error.InvalidState;
     // stop at the declared playable end
@@ -270,7 +266,6 @@ fn finishStream(self: *Self, total: u64) Error!PacketSource.Event {
 
 /// return collected metadata, total_frames counts decoded pcm frames per channel
 /// count includes presentation delay and padding
-// reference: minimp3_ex.h:mp3dec_ex_open_cb, mp3dec_load_index.
 pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
@@ -278,7 +273,6 @@ pub fn info(self: *const Self) types.Info {
 /// seek at or before untrimmed target with reservoir and synthesis history
 /// return decoded origin, caller resets codec and discards samples before target
 /// errors may advance input, requires configuration and a populated index
-// reference: minimp3_ex.h:mp3dec_ex_seek.
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     if (self.source.seek_to == null) return error.Unseekable;
     if (!self.configured) return error.InvalidState;
@@ -327,7 +321,6 @@ fn seekInput(self: *Self, offset: u64) Error!void {
 }
 
 /// free input storage, the seek index, and reader state; leave input open
-// reference: minimp3_ex.h:mp3dec_ex_close.
 pub fn deinit(self: *Self) void {
     const allocator = self.allocator;
     allocator.free(self.buffer);
@@ -337,7 +330,6 @@ pub fn deinit(self: *Self) void {
 
 /// compact consumed bytes and refill; return whether new bytes were read
 /// false can leave buffered bytes available for the caller to inspect
-// reference: minimp3_ex.h:mp3dec_iterate_cb.
 fn fill(self: *Self) Error!bool {
     if (self.eof) return false;
     // preserve unread bytes, including a frame split across reads
@@ -363,7 +355,6 @@ fn fill(self: *Self) Error!bool {
 }
 
 /// skip consecutive leading id3v2 tags, large tags consumed in chunks
-// reference: minimp3_ex.h:mp3dec_skip_id3v2.
 fn skipId3v2(self: *Self) Error!void {
     while (try self.ensureBytes(3)) {
         if (!std.mem.eql(u8, self.buffer[self.consumed..][0..3], "ID3")) return;
@@ -404,7 +395,6 @@ fn skipId3v2(self: *Self) Error!void {
 }
 
 /// borrow buffered audio prefix after trimming recognized trailing metadata
-// reference: minimp3_ex.h:mp3dec_skip_id3v1.
 fn skipId3v1(bytes: []const u8) []const u8 {
     var end = bytes.len;
     // id3v1 occupies 128 bytes; an optional TAG+ extension precedes it
@@ -424,7 +414,6 @@ fn skipId3v1(bytes: []const u8) []const u8 {
 
 /// read xing or info metadata from complete frame, null when absent
 /// malformed recognized fields return error, trim counts in pcm frames per channel
-// reference: minimp3_ex.h:mp3dec_check_vbrtag.
 fn readVbrTag(bytes: []const u8, header: framing.Header) Error!?VbrTag {
     // layout, four byte mpeg header, optional two byte crc, side information, xing or info
     var cursor = header.minimumFrameBytes();
@@ -476,7 +465,6 @@ fn readVbrTag(bytes: []const u8, header: framing.Header) Error!?VbrTag {
 
 /// index complete audio frames before configuration, restore first frame on success
 /// preserve declared playback bounds, errors may advance input
-// reference: minimp3_ex.h:mp3dec_load_index, mp3dec_iterate_cb.
 fn buildIndex(self: *Self) Error!void {
     if (self.configured or self.frame != 0 or self.index.entries.items.len != 0)
         return error.InvalidState;
