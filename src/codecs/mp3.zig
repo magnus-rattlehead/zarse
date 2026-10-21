@@ -94,6 +94,16 @@ const Bits = struct {
         self.position += width;
         if (width == 0 or self.position > self.bytes.len * 8) return 0;
 
+        const mask = (@as(u64, 1) << width) - 1;
+        // enough bytes for one wide load, mask keeps only requested bits
+        if (self.bytes.len - first >= 8) {
+            const value = std.mem.readInt(u64, self.bytes[first..][0..8], .big);
+            const trailing: u6 = @intCast(
+                64 - ((self.position - width) & 7) - width,
+            );
+            return @intCast((value >> trailing) & mask);
+        }
+
         // round end up to a byte, 32 bits starting inside a byte can span five bytes
         const end = (self.position + 7) / 8;
         var value: u64 = 0;
@@ -101,7 +111,6 @@ const Bits = struct {
 
         // shift away bits after requested field, then mask away bits before it
         const trailing: u6 = @intCast(end * 8 - self.position);
-        const mask = (@as(u64, 1) << width) - 1;
         return @intCast((value >> trailing) & mask);
     }
 
@@ -188,8 +197,8 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     if (!ready) return 0;
 
     for (0..2) |index| {
-        // unused frequency values stay zero
-        @memset(&self.scratch.grbuf, 0);
+        // unused frequency values stay zero in active channels
+        @memset(self.scratch.grbuf[0..576 * @as(usize, channels)], 0);
         const first = index * channels;
         decodeGranule(
             &self.state,
@@ -967,22 +976,27 @@ fn decodeGranule(
 
 /// transform 32 subbands at each of the 18 time positions for synthesis
 fn dctII(samples: []f32) void {
-    for (0..18) |time| {
-        var parts: [4][8]f32 = undefined;
+    const Vec = @Vector(2, f32);
+    // each lane handles one of two neighboring time positions
+    for (0..9) |pair| {
+        const time = pair * 2;
+        var parts: [4][8]Vec = undefined;
         // pair mirrored subbands, split 32 point transform into four 8 point parts
         for (0..8) |i| {
-            const x0 = samples[i * 18 + time];
-            const x1 = samples[(15 - i) * 18 + time];
-            const x2 = samples[(16 + i) * 18 + time];
-            const x3 = samples[(31 - i) * 18 + time];
+            const x0: Vec = samples[i * 18 + time..][0..2].*;
+            const x1: Vec = samples[(15 - i) * 18 + time..][0..2].*;
+            const x2: Vec = samples[(16 + i) * 18 + time..][0..2].*;
+            const x3: Vec = samples[(31 - i) * 18 + time..][0..2].*;
             const sum0 = x0 + x3;
             const sum1 = x1 + x2;
-            const diff0 = (x1 - x2) * tables.g_sec[3 * i];
-            const diff1 = (x0 - x3) * tables.g_sec[3 * i + 1];
+            const diff0 = (x1 - x2) * @as(Vec, @splat(tables.g_sec[3 * i]));
+            const diff1 = (x0 - x3) * @as(Vec, @splat(tables.g_sec[3 * i + 1]));
             parts[0][i] = sum0 + sum1;
-            parts[1][i] = (sum0 - sum1) * tables.g_sec[3 * i + 2];
+            parts[1][i] = (sum0 - sum1)
+                * @as(Vec, @splat(tables.g_sec[3 * i + 2]));
             parts[2][i] = diff1 + diff0;
-            parts[3][i] = (diff1 - diff0) * tables.g_sec[3 * i + 2];
+            parts[3][i] = (diff1 - diff0)
+                * @as(Vec, @splat(tables.g_sec[3 * i + 2]));
         }
 
         for (&parts) |*part| {
@@ -1008,40 +1022,42 @@ fn dctII(samples: []f32) void {
             x3 = x1 - x2;
             x1 += x2;
             part[0] = x0 + x1;
-            part[4] = (x0 - x1) * 0.70710677;
+            part[4] = (x0 - x1) * @as(Vec, @splat(0.70710677));
             x5 += x6;
-            x6 = (x6 + x7) * 0.70710677;
+            x6 = (x6 + x7) * @as(Vec, @splat(0.70710677));
             x7 += temp;
-            x3 = (x3 + x4) * 0.70710677;
+            x3 = (x3 + x4) * @as(Vec, @splat(0.70710677));
             // three steps rotate odd part by pi over eight
-            x5 -= x7 * 0.198912367;
-            x7 += x5 * 0.382683432;
-            x5 -= x7 * 0.198912367;
+            x5 -= x7 * @as(Vec, @splat(0.198912367));
+            x7 += x5 * @as(Vec, @splat(0.382683432));
+            x5 -= x7 * @as(Vec, @splat(0.198912367));
             x0 = temp - x6;
             temp += x6;
-            part[1] = (temp + x7) * 0.50979561;
-            part[2] = (x4 + x3) * 0.54119611;
-            part[3] = (x0 - x5) * 0.60134488;
-            part[5] = (x0 + x5) * 0.89997619;
-            part[6] = (x4 - x3) * 1.30656302;
-            part[7] = (temp - x7) * 2.56291556;
+            part[1] = (temp + x7) * @as(Vec, @splat(0.50979561));
+            part[2] = (x4 + x3) * @as(Vec, @splat(0.54119611));
+            part[3] = (x0 - x5) * @as(Vec, @splat(0.60134488));
+            part[5] = (x0 + x5) * @as(Vec, @splat(0.89997619));
+            part[6] = (x4 - x3) * @as(Vec, @splat(1.30656302));
+            part[7] = (temp - x7) * @as(Vec, @splat(2.56291556));
         }
 
         // merge parts into original subband layout, leave other time positions in place
         for (0..7) |i| {
             const first = i * 4 * 18 + time;
-            samples[first] = parts[0][i];
-            samples[first + 18] = parts[2][i] + parts[3][i] + parts[3][i + 1];
-            samples[first + 36] = parts[1][i] + parts[1][i + 1];
-            samples[first + 54] = parts[2][i + 1]
+            samples[first..][0..2].* = parts[0][i];
+            samples[first + 18..][0..2].* = parts[2][i]
+                + parts[3][i]
+                + parts[3][i + 1];
+            samples[first + 36..][0..2].* = parts[1][i] + parts[1][i + 1];
+            samples[first + 54..][0..2].* = parts[2][i + 1]
                 + parts[3][i]
                 + parts[3][i + 1];
         }
         const last = 28 * 18 + time;
-        samples[last] = parts[0][7];
-        samples[last + 18] = parts[2][7] + parts[3][7];
-        samples[last + 36] = parts[1][7];
-        samples[last + 54] = parts[3][7];
+        samples[last..][0..2].* = parts[0][7];
+        samples[last + 18..][0..2].* = parts[2][7] + parts[3][7];
+        samples[last + 36..][0..2].* = parts[1][7];
+        samples[last + 54..][0..2].* = parts[3][7];
     }
 }
 
@@ -1128,39 +1144,46 @@ fn synth(
         history[slot + 64..][0..2].* = .{ left[lower + 1], right[lower + 1] };
         history[slot - 64 + 2..][0..2].* = .{ left[lower], right[lower] };
 
-        var low: [4]f32 = undefined;
-        var high: [4]f32 = undefined;
+        var low: @Vector(4, f32) = undefined;
+        var high: @Vector(4, f32) = undefined;
+        // four lanes cover two channels at two time positions
         // unroll fixed taps so first term and alternating signs stay simple
         inline for (0..8) |tap| {
-            const w0 = tables.g_win[step * 16 + tap * 2];
-            const w1 = tables.g_win[step * 16 + tap * 2 + 1];
-            const recent = history[slot - tap * 64..][0..4];
-            const older = history[slot - (15 - tap) * 64..][0..4];
-            for (&low, &high, recent, older) |*a, *b, z, y| {
-                const sum = z * w1 + y * w0;
-                const diff = if (tap % 2 == 0)
-                    z * w0 - y * w1
-                else
-                    y * w1 - z * w0;
-                if (tap == 0) {
-                    a.* = diff;
-                    b.* = sum;
-                } else {
-                    a.* += diff;
-                    b.* += sum;
-                }
+            const w0: @Vector(4, f32) = @splat(
+                tables.g_win[step * 16 + tap * 2],
+            );
+            const w1: @Vector(4, f32) = @splat(
+                tables.g_win[step * 16 + tap * 2 + 1],
+            );
+            const recent: @Vector(4, f32) = history[slot - tap * 64..][0..4].*;
+            const older: @Vector(4, f32) = history[slot - (15 - tap) * 64..][
+                0..4
+            ].*;
+            const sum = recent * w1 + older * w0;
+            const diff = if (tap % 2 == 0)
+                recent * w0 - older * w1
+            else
+                older * w1 - recent * w0;
+            if (tap == 0) {
+                low = diff;
+                high = sum;
+            } else {
+                low += diff;
+                high += sum;
             }
         }
 
+        const low_values: [4]f32 = low;
+        const high_values: [4]f32 = high;
         // mirrored pcm positions share each weighted history sum
         for (0..2) |time| {
             for (0..channels) |channel| {
                 const lane = time * 2 + channel;
                 output[(time * 32 + 15 - band) * channels + channel] = scalePcm(
-                    low[lane],
+                    low_values[lane],
                 );
                 output[(time * 32 + 17 + band) * channels + channel] = scalePcm(
-                    high[lane],
+                    high_values[lane],
                 );
             }
         }

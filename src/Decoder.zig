@@ -228,6 +228,8 @@ fn advance(self: *Decoder) Error!Advance {
     }
     // reject repeated empty codec output between input packets
     var empty_events: usize = 0;
+    // mp3 packet duration counts pcm frames consumed during seek warmup
+    var warmup_frames: u64 = 0;
     while (true) {
         const result = try self.codec.receive();
         switch (result) {
@@ -241,6 +243,14 @@ fn advance(self: *Decoder) Error!Advance {
                 if (block.samples.len == 0) {
                     empty_events += 1;
                     if (empty_events > 1) return error.InvalidState;
+                    // missing reservoir bytes still use up part of the seek discard distance
+                    self.decoded_frame = std.math.add(
+                        i128,
+                        self.decoded_frame,
+                        warmup_frames,
+                    )
+                        catch return error.InvalidData;
+                    warmup_frames = 0;
                     continue;
                 }
                 try self.acceptBlock(block);
@@ -288,6 +298,13 @@ fn advance(self: *Decoder) Error!Advance {
                         if (try self.codec.submit(packet) != .accepted) {
                             return error.InvalidState;
                         }
+                        warmup_frames = if (
+                            self.metadata.format == .mp3
+                                and self.discard_until != null
+                        )
+                            packet.duration orelse return error.InvalidData
+                        else
+                            0;
                         empty_events = 0;
                     },
                     .presentation => |bounds| {
