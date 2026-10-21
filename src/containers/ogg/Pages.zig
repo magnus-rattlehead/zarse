@@ -1,5 +1,6 @@
 //! read one audio stream; shared framing assembles packets
 const std = @import("std");
+const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
 const Error = @import("../../types.zig").Error;
 const framing = @import("framing.zig");
@@ -257,9 +258,12 @@ pub const Input = struct {
             catch return error.InvalidData;
         return bytesRead;
     }
+    /// read prefix then source using the shared reader interface
+    pub const readSliceShort = read;
+
     /// fill the buffer or report truncated input
     pub fn required(self: *Input, out: []u8) Error!void {
-        if (try self.read(out) != out.len) return error.TruncatedData;
+        return input_helpers.readRequired(self, out);
     }
     /// seek absolutely and disable prefix replay; requires seek support
     pub fn seek(self: *Input, offset: u64) Error!void {

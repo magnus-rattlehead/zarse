@@ -2,7 +2,7 @@
 const std = @import("std");
 
 /// identify the audio container
-pub const Format = enum { wav, wave64, ogg, mp3 };
+pub const Format = enum { wav, wave64, ogg, mp3, flac };
 
 /// sample storage width and numeric representation
 pub const PcmSampleType = enum {
@@ -40,6 +40,7 @@ pub const DecodingScheme = union(enum) {
     pcm: PcmFormat,
     opus: OpusConfig,
     vorbis: VorbisConfig,
+    flac: FlacConfig,
     mp3,
     alaw,
     mulaw,
@@ -50,6 +51,9 @@ pub const DecodingScheme = union(enum) {
 /// keep them unchanged until codec initialization copies their state
 pub const VorbisConfig = struct { headers: [3][]const u8 };
 
+/// Value-owned FLAC STREAMINFO; no borrowed metadata or codec storage.
+pub const FlacConfig = @import("codecs/flac/StreamInfo.zig");
+
 /// configure opus mapping families 0 and 1 in opus and vorbis channel order
 pub const OpusConfig = struct {
     // coded streams, coupled streams produce two channels each
@@ -59,6 +63,32 @@ pub const OpusConfig = struct {
     mapping: [8]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
     /// signed fixed point db gain, 256 units per db
     gain_q8: i16 = 0,
+
+    /// validate the output format, coded stream topology, and channel mapping
+    pub fn validate(
+        self: OpusConfig,
+        format: AudioFormat,
+    ) ValidationError!void {
+        if (
+            format.sample_rate != 48000
+                or format.channels == 0
+                or format.channels > 8
+        )
+            return error.InvalidData;
+        // coupled streams add one extra coded channel each
+        const coded_channels = @as(u16, self.streams) + self.coupled_streams;
+        if (
+            self.streams == 0
+                or self.coupled_streams > self.streams
+                or coded_channels > 255
+        )
+            return error.InvalidData;
+        // map value 255 requests silence
+        for (self.mapping[0..format.channels]) |channel_index| {
+            if (channel_index != 255 and channel_index >= coded_channels)
+                return error.InvalidData;
+        }
+    }
 };
 
 /// locate an absolute byte range in the source
@@ -88,6 +118,8 @@ pub const Info = struct {
     format: Format,
     sample_rate: u32,
     channels: u16,
+    /// wave speaker bits; null preserves unspecified source channel order
+    channel_mask: ?u32 = null,
     /// count frames, each with one sample per channel; null means unknown
     total_frames: ?u64,
     /// record whether the output sample rate has changed
@@ -110,6 +142,7 @@ pub const ValidationError = error{ InvalidData };
 pub const ParseError = error{
     UnsupportedFormat,
     UnsupportedChunkLayout,
+    LimitExceeded,
     InvalidData,
     TruncatedData,
 };

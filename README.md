@@ -14,14 +14,14 @@ All container and codec support is enabled by default. Disable features for smal
 
 ```sh
 # MP3 only
-zig build -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false
-zig build run -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false -- path/to/audio.mp3
+zig build -Dflac=false -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false
+zig build run -Dflac=false -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false -- path/to/audio.mp3
 
 # WAV/PCM only
-zig build -Dogg=false -Dmp3=false -Dopus=false -Dvorbis=false
+zig build -Dflac=false -Dogg=false -Dmp3=false -Dopus=false -Dvorbis=false
 
 # Ogg Opus only
-zig build -Dwav=false -Dmp3=false -Dpcm=false -Dvorbis=false
+zig build -Dflac=false -Dwav=false -Dmp3=false -Dpcm=false -Dvorbis=false
 ```
 
 ## Roadmap
@@ -76,7 +76,7 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [ ] ALAC.
 - [ ] DTS.
 - [ ] EAC3.
-- [ ] FLAC.
+- [x] FLAC.
 - [x] MP3 (MPEG-1 Layer III decoder, MPEG2 and 2.5 still TODO).
 - [ ] Mu-law.
 - [x] Opus (temporary libopus backend).
@@ -89,7 +89,7 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [x] MP3 streams
 - [x] Ogg container (Opus and Vorbis; remaining work above).
 - [ ] ADTS.
-- [ ] FLAC.
+- [x] FLAC.
 - [ ] M4A.
 - [ ] AIFF.
 - [ ] AIFC.

@@ -2,6 +2,7 @@
 //! riff.zig shares parsing between seekable and streaming input
 const std = @import("std");
 const types = @import("../../types.zig");
+const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
 const PacketSource = @import("../../PacketSource.zig");
 const riff = @import("riff.zig");
@@ -24,6 +25,8 @@ pub const wave64 = riff.wave64;
 /// parse metadata and borrowed audio ranges; keep input unchanged
 /// errors may leave input at any position
 pub const parse = riff.parse;
+/// parse with the same metadata limits used by sequential playback
+pub const parseOptions = riff.parseOptions;
 
 allocator: std.mem.Allocator,
 source: Source,
@@ -38,6 +41,10 @@ scheme: ?types.InputScheme = null,
 /// fixed input storage borrowed by packets
 buffer: []u8 = &.{},
 packet_capacity: usize = 0,
+/// retain final audio beyond the packet buffer while resolving wave64 padding
+padding_tail: [7]u8 = undefined,
+tail_length: usize = 0,
+tail_position: usize = 0,
 current: ?types.Segment = null,
 segment_bytes: u64 = 0,
 frame: u64 = 0,
@@ -63,7 +70,7 @@ pub fn init(
     state.buffer = try allocator.alloc(u8, options.bufferCapacity());
     // seekable inputs scan metadata and cache segment layout before playback
     if (seekable) {
-        state.parsed = try parse(source);
+        state.parsed = try parseOptions(source, options);
         state.segments = state.parsed.?.data.iterate(source);
         state.metadata = state.parsed.?.info;
         try state.initIndex();
@@ -78,6 +85,7 @@ pub fn init(
         .format = stream.kind,
         .sample_rate = fmt.sample_rate,
         .channels = fmt.channels,
+        .channel_mask = fmt.channelMask(),
         .total_frames = if (stream.finished) stream.frames else null,
     };
     return state.interface(fmt.decodingScheme(stream.byte_order));
@@ -126,6 +134,18 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     const scheme = self.scheme orelse return error.InvalidState;
     const unit = scheme.unitBytes().?;
     while (true) {
+        if (self.tail_position < self.tail_length) {
+            const count = @min(
+                self.packet_capacity,
+                self.tail_length - self.tail_position,
+            );
+            @memcpy(
+                self.buffer[0..count],
+                self.padding_tail[self.tail_position..][0..count],
+            );
+            self.tail_position += count;
+            return self.audioPacket(count, scheme);
+        }
         // fetch next segment only after current data or silence exhausted
         if (self.current == null) {
             self.current = if (self.stream) |*stream|
@@ -162,20 +182,17 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                     if (stream.kind == .wave64) {
                         // retain final frames plus up to seven padding bytes
                         const tail = range.length
-                            - (range.length
-                                - @min(range.length, @as(u64, unit) + 7))
+                            - (range.length - @min(range.length, 7))
                                 / unit
                                 * unit;
                         if (remaining <= tail) {
-                            if (remaining > self.options.max_payload_bytes) {
-                                return error.LimitExceeded;
-                            }
-                            if (remaining > self.buffer.len) {
-                                return error.LimitExceeded;
-                            }
-                            try stream.read(
-                                self.buffer[0..@intCast(remaining)],
+                            // only the padding-sized suffix needs extra storage
+                            const buffered: usize = @intCast(
+                                @min(remaining, self.packet_capacity),
                             );
+                            const extra: usize = @intCast(remaining - buffered);
+                            try stream.read(self.buffer[0..buffered]);
+                            try stream.read(self.padding_tail[0..extra]);
                             if (try stream.next() != null) {
                                 return error.UnsupportedChunkLayout;
                             }
@@ -184,7 +201,12 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                             if (length < self.segment_bytes) {
                                 return error.InvalidData;
                             }
-                            count = @intCast(length - self.segment_bytes);
+                            const audio_bytes: usize = @intCast(
+                                length - self.segment_bytes,
+                            );
+                            count = @min(audio_bytes, buffered);
+                            self.tail_length = audio_bytes - count;
+                            self.tail_position = 0;
                             self.metadata.total_frames = stream.frames;
                             self.current = null;
                         } else {
@@ -195,37 +217,47 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 } else {
                     // borrowed segment ranges may be separated by metadata chunks
                     try self.source.seekTo(range.offset + self.segment_bytes);
-                    self.source.reader.readSliceAll(self.buffer[0..count])
-                        catch |err| return switch (err) {
-                            error.EndOfStream => error.TruncatedData,
-                            else => err,
-                        };
+                    try input_helpers.readRequired(
+                        self.source.reader,
+                        self.buffer[0..count],
+                    );
                 }
                 if (count % unit != 0) return error.InvalidData;
                 self.segment_bytes += count;
                 if (self.segment_bytes == range.length) self.current = null;
                 if (count == 0) continue;
-                var packet = types.Packet{ .bytes = self.buffer[0..count] };
-                // sample units map directly to pcm frames, block durations left unknown
-                if (scheme == .samples) {
-                    if (self.frame > std.math.maxInt(i64)) {
-                        return error.InvalidData;
-                    }
-                    packet.timestamp = .{
-                        .value = @intCast(self.frame),
-                        .time_base = .{
-                            .numerator = 1,
-                            .denominator = self.metadata.sample_rate,
-                        },
-                    };
-                    packet.duration = count / unit;
-                    self.frame = std.math.add(u64, self.frame, count / unit)
-                        catch return error.InvalidData;
-                }
-                return .{ .packet = packet };
+                return self.audioPacket(count, scheme);
             },
         }
     }
+}
+
+/// publish whole audio units and advance their untrimmed timeline
+fn audioPacket(
+    self: *Self,
+    count: usize,
+    scheme: types.InputScheme,
+) Error!PacketSource.Event {
+    const unit = scheme.unitBytes().?;
+    if (count % unit != 0) return error.InvalidData;
+    var packet = types.Packet{ .bytes = self.buffer[0..count] };
+    // sample units map directly to pcm frames, block durations left unknown
+    if (scheme == .samples) {
+        if (self.frame > std.math.maxInt(i64)) {
+            return error.InvalidData;
+        }
+        packet.timestamp = .{
+            .value = @intCast(self.frame),
+            .time_base = .{
+                .numerator = 1,
+                .denominator = self.metadata.sample_rate,
+            },
+        };
+        packet.duration = count / unit;
+        self.frame = std.math.add(u64, self.frame, count / unit)
+            catch return error.InvalidData;
+    }
+    return .{ .packet = packet };
 }
 
 /// return known stream metadata and untrimmed frame count
@@ -233,12 +265,26 @@ pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
+/// report frame seeking only for indexed, configured sample units
+pub fn canSeek(self: *const Self) bool {
+    return self.parsed != null
+        and self.scheme != null
+        and self.scheme.? == .samples;
+}
+
 /// seek at or before requested frame, replay prior data when silence needs history
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
-    const parsed = self.parsed orelse return error.Unseekable;
-    const scheme = self.scheme orelse return error.InvalidState;
-    if (scheme != .samples) return error.Unseekable;
-    if (frame > self.metadata.total_frames.?) return error.OutOfRange;
+    try PacketSource.validateSeek(
+        self.scheme != null,
+        self.canSeek(),
+        frame,
+        0,
+        self.metadata.total_frames,
+    );
+    const parsed = self.parsed.?;
+    const scheme = self.scheme.?;
+    self.tail_length = 0;
+    self.tail_position = 0;
     self.segments = parsed.data.iterate(self.source);
     self.current = null;
     self.segment_bytes = 0;
@@ -304,6 +350,7 @@ pub fn deinit(self: *Self) void {
 
 /// open an unchanged parsed layout with seek and size support
 /// allocate packet storage and any wavl index
+/// trust supplied metadata; wire limits belong to the preceding parseOptions call
 pub fn initParsed(
     allocator: std.mem.Allocator,
     source: Source,
@@ -364,26 +411,17 @@ fn initIndex(self: *Self) Error!void {
 
 /// transfer reader ownership into packet source with parsed audio format
 fn interface(self: *Self, encoding: types.DecodingScheme) PacketSource {
-    var format = types.AudioFormat{
+    const format = types.AudioFormat{
         .channels = self.metadata.channels,
         .sample_rate = self.metadata.sample_rate,
+        // extensible format may supply explicit speaker mask in either input mode
+        .channel_mask = self.metadata.channel_mask,
     };
-    // streamed extensible format may supply explicit speaker mask
-    if (self.stream) |stream| {
-        if (stream.format.?.extension) |extension| {
-            if (
-                extension.payload == .extensible
-                    and extension.payload.extensible.channel_mask != 0
-            ) {
-                format.channel_mask = extension.payload.extensible.channel_mask;
-            }
-        }
-    }
     return .{
         .backend = .{ .wave = self },
         .encoding = encoding,
         .format = format,
-        .seekable = self.parsed != null,
+        .seekable = self.parsed != null and encoding == .pcm,
         .max_payload_bytes = self.options.max_payload_bytes,
     };
 }

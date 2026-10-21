@@ -1,5 +1,6 @@
 //! ogg bit packing; writers own storage and readers borrow input
 const std = @import("std");
+const bit_reader = @import("bit_reader.zig");
 
 /// shared bit cursor, readers borrow buffer and writers own allocation
 const State = struct {
@@ -200,53 +201,31 @@ fn writeCopy(
     }
 }
 
-/// mark reader exhausted using libogg cursor convention
-fn overflow(state: *State) void {
-    state.endByte = state.buffer.len;
-    state.endBit = 1;
-    state.failed = true;
-}
-
-/// peek up to 32 bits, null if unavailable
+/// Peek a complete field, returning an error when it is unavailable.
 fn look(
     comptime most_significant_first: bool,
     state: *const State,
     width: u6,
-) ?u32 {
-    if (width > 32 or state.failed or state.endByte > state.buffer.len)
-        return null;
-    const total: u6 = width + @as(u6, state.endBit);
-    // round up bytes needed for width plus current bit offset
-    const bytes: usize = (@as(usize, total) + 7) / 8;
-    if (bytes > state.buffer.len - state.endByte) return null;
-    if (width == 0) return 0;
-    // assemble enough bytes to cover value and partial byte offset
-    var word: u64 = 0;
-    for (state.buffer[state.endByte..][0..bytes], 0..) |byte, byte_index| {
-        if (most_significant_first) {
-            word = (word << 8) | byte;
-        } else {
-            word |= @as(u64, byte) << @as(u6, @intCast(byte_index * 8));
-        }
-    }
-    const shift: u6 = if (most_significant_first)
-        @intCast(bytes * 8 - total)
-    else
-        state.endBit;
-    return @as(u32, @truncate(word >> shift)) & lowMask(width);
+) bit_reader.Error!u32 {
+    if (width > 32) return error.InvalidBitCount;
+    if (state.failed or state.endByte > state.buffer.len)
+        return error.EndOfStream;
+    return bit_reader.peek(
+        if (most_significant_first) .big else .little,
+        state.buffer[state.endByte..],
+        state.endBit,
+        width,
+    );
 }
 
-/// read then advance, failed peek marks reader exhausted
+/// Read a complete field; errors leave the cursor unchanged.
 fn readValue(
     comptime most_significant_first: bool,
     state: *State,
     width: u6,
-) ?u32 {
-    const value = look(most_significant_first, state, width) orelse {
-        overflow(state);
-        return null;
-    };
-    advanceCursor(state, width);
+) bit_reader.Error!u32 {
+    const value = try look(most_significant_first, state, width);
+    try advanceCursor(state, width);
     return value;
 }
 
@@ -269,25 +248,18 @@ fn clear(state: *State) void {
     state.* = .{};
 }
 
-/// skip bits, overflow or insufficient bytes exhaust reader
-fn advanceCursor(state: *State, bits: usize) void {
-    const total = std.math.add(usize, bits, state.endBit) catch {
-        overflow(state);
-        return;
-    };
+/// Skip only when the entire requested range is available.
+fn advanceCursor(state: *State, bits: usize) bit_reader.Error!void {
+    if (state.failed or state.endByte > state.buffer.len)
+        return error.EndOfStream;
+    var reader = bit_reader.SliceReader(.little)
+        .init(state.buffer[state.endByte..]);
+    reader.position = state.endBit;
+    try reader.advance(bits);
     // partial final byte must also exist in input
-    const needed = total / 8 + @intFromBool(total % 8 != 0);
-    if (
-        state.failed
-            or state.endByte > state.buffer.len
-            or needed > state.buffer.len - state.endByte
-    ) {
-        overflow(state);
-        return;
-    }
     // advance whole bytes and retain low three bits as bit offset
-    state.endByte += total / 8;
-    state.endBit = @truncate(total);
+    state.endByte += reader.position / 8;
+    state.endBit = @truncate(reader.position);
 }
 
 /// byte count including any partial final byte
@@ -308,6 +280,16 @@ fn getBytes(state: *const State) []const u8 {
         state.buffer;
 }
 
+/// Historical libogg-facing reader contracts, retained for reference:
+/// peek up to 32 bits, null if unavailable
+/// read then advance, failed peek marks reader exhausted
+/// skip bits, overflow or insufficient bytes exhaust reader
+/// peek one bit, null when unavailable
+/// failed reads exhaust the reader, matching libogg
+/// consume one bit, null marks exhausted reader
+/// skip bits, mark exhausted if skip exceeds input
+/// whether earlier read or advance exceeded input
+/// Native operations now return errors and preserve the cursor on failure.
 /// select bit order at compile time, little is lsb first, big is msb first
 /// keep borrowed input unchanged while reading
 pub fn BitReader(comptime order: std.builtin.Endian) type {
@@ -321,35 +303,35 @@ pub fn BitReader(comptime order: std.builtin.Endian) type {
         }
 
         /// failed peeks leave the cursor unchanged
-        pub fn peek(self: *const Self, width: u6) ?u32 {
+        pub fn peek(self: *const Self, width: u6) bit_reader.Error!u32 {
             return look(order == .big, &self.state, width);
         }
 
-        /// peek one bit, null when unavailable
-        pub fn peekBit(self: *const Self) ?u1 {
-            const value = self.peek(1) orelse return null;
+        /// Peek one bit without moving the cursor.
+        pub fn peekBit(self: *const Self) bit_reader.Error!u1 {
+            const value = try self.peek(1);
             return @intCast(value);
         }
 
-        /// failed reads exhaust the reader, matching libogg
-        pub fn read(self: *Self, width: u6) ?u32 {
+        /// Read a complete field; errors leave the cursor unchanged.
+        pub fn read(self: *Self, width: u6) bit_reader.Error!u32 {
             return readValue(order == .big, &self.state, width);
         }
 
-        /// consume one bit, null marks exhausted reader
-        pub fn readBit(self: *Self) ?u1 {
-            const value = self.read(1) orelse return null;
+        /// Read one bit; errors leave the cursor unchanged.
+        pub fn readBit(self: *Self) bit_reader.Error!u1 {
+            const value = try self.read(1);
             return @intCast(value);
         }
 
-        /// skip bits, mark exhausted if skip exceeds input
-        pub fn advance(self: *Self, bits: usize) void {
-            advanceCursor(&self.state, bits);
+        /// Skip bits; errors leave the cursor unchanged.
+        pub fn advance(self: *Self, bits: usize) bit_reader.Error!void {
+            try advanceCursor(&self.state, bits);
         }
 
         /// skip one bit using same bounds checks
-        pub fn advanceBit(self: *Self) void {
-            self.advance(1);
+        pub fn advanceBit(self: *Self) bit_reader.Error!void {
+            try self.advance(1);
         }
 
         /// number of bits consumed
@@ -362,9 +344,10 @@ pub fn BitReader(comptime order: std.builtin.Endian) type {
             return countBytes(&self.state);
         }
 
-        /// whether earlier read or advance exceeded input
+        /// Whether no input remains or the imported C cursor is invalid.
         pub fn isExhausted(self: *const Self) bool {
-            return self.state.failed;
+            return self.state.failed
+                or self.state.endByte == self.state.buffer.len;
         }
 
         /// borrow original input including bytes already consumed

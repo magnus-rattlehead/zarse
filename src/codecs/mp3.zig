@@ -1,6 +1,7 @@
 //! decode complete mpeg 1 layer iii frames into f32 pcm samples, alternating channels
 //! source: https://github.com/lieff/minimp3
 const std = @import("std");
+const bit_reader = @import("bit_reader.zig");
 const types = @import("../types.zig");
 const Codec = @import("../Codec.zig");
 const framing = @import("../containers/mp3/framing.zig");
@@ -76,54 +77,26 @@ const Scratch = struct {
     ist_pos: [2][39]u8 = @splat(@splat(0)),
 };
 
+/// Historical notes from the replaced codec-local reader:
 /// encoded bytes owned by caller, with current bit position
-const Bits = struct {
-    bytes: []const u8 = &.{},
-    position: usize = 0,
+/// borrow encoded bytes starting at bit zero
+/// read zero to 32 bits, starting from high bit of each byte
+/// still advance past missing bits and return zero so caller can reject frame
+// keep attempted position so side info checks can detect missing bits
+/// read ahead without moving position, missing bits are zero
+// reader keeps attempted position, reject side information that ran out of bytes
+/// The shared reader now returns errors without consuming a missing field.
+const Bits = bit_reader.SliceReader(.big);
 
-    /// borrow encoded bytes starting at bit zero
-    fn init(bytes: []const u8) Bits {
-        return .{ .bytes = bytes };
-    }
-
-    /// read zero to 32 bits, starting from high bit of each byte
-    /// still advance past missing bits and return zero so caller can reject frame
-    fn read(self: *Bits, width: u6) u32 {
-        const first = self.position / 8;
-        // keep attempted position so side info checks can detect missing bits
-        self.position += width;
-        if (width == 0 or self.position > self.bytes.len * 8) return 0;
-
-        const mask = (@as(u64, 1) << width) - 1;
-        // enough bytes for one wide load, mask keeps only requested bits
-        if (self.bytes.len - first >= 8) {
-            const value = std.mem.readInt(u64, self.bytes[first..][0..8], .big);
-            const trailing: u6 = @intCast(
-                64 - ((self.position - width) & 7) - width,
-            );
-            return @intCast((value >> trailing) & mask);
-        }
-
-        // round end up to a byte, 32 bits starting inside a byte can span five bytes
-        const end = (self.position + 7) / 8;
-        var value: u64 = 0;
-        for (self.bytes[first..end]) |byte| value = (value << 8) | byte;
-
-        // shift away bits after requested field, then mask away bits before it
-        const trailing: u6 = @intCast(end * 8 - self.position);
-        return @intCast((value >> trailing) & mask);
-    }
-
-    /// read ahead without moving position, missing bits are zero
-    fn peek(self: Bits, width: u6) u32 {
-        const count: u6 = @intCast(
-            @min(width, self.bytes.len * 8 -| self.position),
-        );
-        if (count == 0) return 0;
-        var copy = self;
-        return copy.read(count) << @as(u5, @intCast(width - count));
-    }
-};
+/// Select a Huffman table entry using the available prefix. Short codewords can
+/// be decoded with fewer bits than the table width; read/advance still checks
+/// the selected codeword and its sign bits against the granule boundary.
+fn huffmanIndex(reader: *const Bits, width: u6) bit_reader.Error!u32 {
+    const count: u6 = @intCast(@min(width, reader.remaining()));
+    const prefix = try reader.peek(count);
+    if (count == 0) return 0;
+    return prefix << @as(u5, @intCast(width - count));
+}
 
 /// check mono or stereo format, allocate packet adapter and pcm output
 pub fn init(
@@ -148,7 +121,23 @@ pub fn init(
 
 /// decode one complete mpeg 1 layer iii frame, return pcm frames per channel
 /// save available main data and return zero while earlier bytes are missing
+/// output must be channel aligned and hold 1152 frames; input failures require reset before reuse
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
+    try Codec.validateOutput(output, self.format.channels, 1152);
+    if (bytes.len == 0) return error.InvalidData;
+    return self.decodeFrame(bytes, output)
+        catch |err| switch (err) {
+            error.EndOfStream => error.TruncatedData,
+            error.InvalidBitCount => error.InvalidData,
+            else => |other| return other,
+        };
+}
+
+fn decodeFrame(
+    self: *Self,
+    bytes: []const u8,
+    output: []f32,
+) (Error || bit_reader.Error)!usize {
     const header = try Header.parse(bytes);
     // limit decoding to mpeg 1 before reading version specific fields
     if (header.version() != .mpeg1) return error.UnsupportedEncoding;
@@ -179,7 +168,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
 
     var bits = Bits.init(bytes[4..]);
     // crc takes two bytes before side information
-    if (header.hasCrc()) _ = bits.read(16);
+    if (header.hasCrc()) _ = try bits.read(16);
     // two granules per channel, each produces 576 frames
     const granules = self.scratch.granules[0..2 * channels];
     const main_data_begin = try readSideInfo(&bits, granules, header);
@@ -200,7 +189,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
         // unused frequency values stay zero in active channels
         @memset(self.scratch.grbuf[0..576 * @as(usize, channels)], 0);
         const first = index * channels;
-        decodeGranule(
+        try decodeGranule(
             &self.state,
             &self.scratch,
             granules[first..][0..channels],
@@ -220,7 +209,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
 }
 
 /// clear saved bytes, transform overlap and synthesis history after a seek
-pub fn reset(self: *Self) void {
+pub fn reset(self: *Self) Error!void {
     self.state = .{};
 }
 
@@ -228,14 +217,18 @@ pub fn reset(self: *Self) void {
 pub fn deinit(_: *Self) void {}
 
 /// read granule settings and number of earlier bytes needed, reject invalid side information
-fn readSideInfo(bits: *Bits, granules: []Granule, header: Header) Error!usize {
+fn readSideInfo(
+    bits: *Bits,
+    granules: []Granule,
+    header: Header,
+) (Error || bit_reader.Error)!usize {
     const channels: usize = header.channels();
     const count = channels * 2;
     const band_table = header.bandTableIndex();
     // nine bit count of how far back main data starts
-    const main_data_begin: usize = bits.read(9);
+    const main_data_begin: usize = try bits.read(9);
     // pack private bits and reuse flags as minimp3 does, mono uses nine bits, stereo eleven
-    var scfsi = bits.read(@intCast(7 + count));
+    var scfsi = try bits.read(@intCast(7 + count));
 
     var part_23_sum: usize = 0;
     for (granules[0..count]) |*granule| {
@@ -244,22 +237,22 @@ fn readSideInfo(bits: *Bits, granules: []Granule, header: Header) Error!usize {
         // buffers are reused across frames, clear fields this block type leaves out
         granule.* = .{};
         // part 2 holds scalefactors, part 3 holds huffman coded frequency values
-        granule.part_23_length = @intCast(bits.read(12));
+        granule.part_23_length = @intCast(try bits.read(12));
         part_23_sum += granule.part_23_length;
-        granule.big_values = @intCast(bits.read(9));
+        granule.big_values = @intCast(try bits.read(9));
         // each big value entry covers two of the 576 frequency values
         if (granule.big_values > 288) return error.InvalidData;
-        granule.global_gain = @intCast(bits.read(8));
-        granule.scalefac_compress = @intCast(bits.read(4));
+        granule.global_gain = @intCast(try bits.read(8));
+        granule.scalefac_compress = @intCast(try bits.read(4));
         // normal long blocks have 22 scalefactor bands
         granule.sfbtab = &tables.g_scf_long[band_table];
         granule.n_long_sfb = 22;
 
-        if (bits.read(1) != 0) {
+        if ((try bits.read(1)) != 0) {
             // switched blocks choose start, short or stop windows, zero is invalid here
-            granule.block_type = @intCast(bits.read(2));
+            granule.block_type = @intCast(try bits.read(2));
             if (granule.block_type == 0) return error.InvalidData;
-            granule.mixed_block_flag = @intCast(bits.read(1));
+            granule.mixed_block_flag = @intCast(try bits.read(1));
             // switched blocks have two huffman regions, 255 covers all remaining bands
             granule.region_count[0] = 7;
             granule.region_count[1] = 255;
@@ -280,30 +273,28 @@ fn readSideInfo(bits: *Bits, granules: []Granule, header: Header) Error!usize {
                 }
             }
             for (granule.table_select[0..2]) |*table|
-                table.* = @intCast(bits.read(5));
+                table.* = @intCast(try bits.read(5));
             // separate gain adjustment for each of the three short windows
             for (&granule.subblock_gain) |*gain|
-                gain.* = @intCast(bits.read(3));
+                gain.* = @intCast(try bits.read(3));
         } else {
             // long blocks give three huffman table choices and two region lengths
             for (&granule.table_select) |*table|
-                table.* = @intCast(bits.read(5));
-            granule.region_count[0] = @intCast(bits.read(4));
-            granule.region_count[1] = @intCast(bits.read(3));
+                table.* = @intCast(try bits.read(5));
+            granule.region_count[0] = @intCast(try bits.read(4));
+            granule.region_count[1] = @intCast(try bits.read(3));
             granule.region_count[2] = 255;
         }
 
         // preflag enables extra reduction for higher bands
-        granule.preflag = @intCast(bits.read(1));
-        granule.scalefac_scale = @intCast(bits.read(1));
-        granule.count1_table = @intCast(bits.read(1));
+        granule.preflag = @intCast(try bits.read(1));
+        granule.scalefac_scale = @intCast(try bits.read(1));
+        granule.count1_table = @intCast(try bits.read(1));
         // take next four reuse flags, one per scalefactor group
         granule.scfsi = @intCast((scfsi >> 12) & 15);
         scfsi <<= 4;
     }
-    // reader keeps attempted position, reject side information that ran out of bytes
     const limit = bits.bytes.len * 8;
-    if (bits.position > limit) return error.InvalidData;
     // scalefactor and huffman bits must fit current main data plus requested earlier bytes
     if (part_23_sum > limit - bits.position + main_data_begin * 8)
         return error.InvalidData;
@@ -318,7 +309,7 @@ fn readScalefactors(
     counts: []const u8,
     bits: *Bits,
     scfsi: u8,
-) void {
+) (Error || bit_reader.Error)!void {
     var offset: usize = 0;
     var reuse = scfsi;
     for (0..4) |group| {
@@ -336,7 +327,7 @@ fn readScalefactors(
         } else {
             const width = sizes[group];
             for (values, positions) |*value, *position| {
-                value.* = @intCast(bits.read(@intCast(width)));
+                value.* = @intCast(try bits.read(@intCast(width)));
                 position.* = value.*;
             }
         }
@@ -373,7 +364,7 @@ fn decodeScalefactors(
     bits: *Bits,
     granule: *const Granule,
     scf: []f32,
-) void {
+) (Error || bit_reader.Error)!void {
     // table rows give group sizes for long, mixed and short blocks
     const layout: usize = @as(usize, @intFromBool(granule.n_short_sfb != 0))
         + @intFromBool(granule.n_long_sfb == 0);
@@ -382,7 +373,14 @@ fn decodeScalefactors(
     const part = tables.g_scfc_decode[granule.scalefac_compress];
     const sizes = [_]u8{ part >> 2, part >> 2, part & 3, part & 3 };
     var encoded: [40]u8 = undefined;
-    readScalefactors(&encoded, ist_pos, &sizes, partition, bits, granule.scfsi);
+    try readScalefactors(
+        &encoded,
+        ist_pos,
+        &sizes,
+        partition,
+        bits,
+        granule.scfsi,
+    );
 
     const shift: u3 = @intCast(granule.scalefac_scale + 1);
     if (granule.n_short_sfb != 0) {
@@ -443,7 +441,7 @@ fn decodeHuffman(
     granule: *const Granule,
     scf: []const f32,
     bit_limit: usize,
-) void {
+) (Error || bit_reader.Error)!void {
     var reader = bits.*;
     // next channel starts at declared granule end, including any unused padding bits
     defer bits.position = bit_limit;
@@ -469,33 +467,43 @@ fn decodeHuffman(
             for (0..count) |_| {
                 // first five bits choose a value or a smaller lookup table
                 var width: u6 = 5;
-                var leaf = codebook[reader.peek(width)];
+                var leaf = codebook[try huffmanIndex(&reader, width)];
                 while (leaf < 0) {
-                    reader.position += width;
+                    try reader.advance(width);
                     width = @intCast(leaf & 7);
-                    const next = @as(i32, @intCast(reader.peek(width)))
+                    const next = @as(
+                        i32,
+                        @intCast(try huffmanIndex(&reader, width)),
+                    )
                         - (@as(i32, leaf) >> 3);
                     leaf = codebook[@intCast(next)];
                 }
                 // high bits hold code length, low two groups of four hold pair values
-                reader.position += @as(u16, @intCast(leaf)) >> 8;
+                try reader.advance(@as(u16, @intCast(leaf)) >> 8);
                 for (0..2) |_| {
                     var value: i32 = leaf & 15;
                     if (value == 15 and extra_bits != 0) {
                         // extra bits extend largest table value before its sign bit
-                        value += @intCast(reader.peek(@intCast(extra_bits)));
-                        reader.position += extra_bits;
-                        const sign: f32 = if (reader.peek(1) != 0) -1 else 1;
+                        value += @intCast(
+                            try reader.read(@intCast(extra_bits)),
+                        );
+                        const sign: f32 = if ((try reader.peek(1)) != 0)
+                            -1
+                        else
+                            1;
                         output[sample] = scale * pow43(value) * sign;
                     } else {
                         // table stores positive and negative small values
-                        const negative: i32 = @intCast(reader.peek(1));
+                        const negative: i32 = if (value == 0)
+                            0
+                        else
+                            @intCast(try reader.peek(1));
                         output[sample] = tables.g_pow43[
                             @intCast(16 + value - 16 * negative)
                         ]
                             * scale;
                     }
-                    if (value != 0) reader.position += 1;
+                    if (value != 0) try reader.advance(1);
                     sample += 1;
                     leaf >>= 4;
                 }
@@ -513,17 +521,23 @@ fn decodeHuffman(
         &tables.tab33
     else
         &tables.tab32;
-    while (sample < 576) {
-        var leaf = count1_book[reader.peek(4)];
+    while (sample < 576 and reader.remaining() != 0) {
+        var leaf = count1_book[try huffmanIndex(&reader, 4)];
         if (leaf & 8 == 0) {
             // some four bit entries need up to three more bits to choose a code
             const extra: u6 = @intCast(leaf & 3);
             const mask = (@as(u32, 1) << @as(u5, @intCast(extra))) - 1;
-            leaf = count1_book[(leaf >> 3) + (reader.peek(4 + extra) & mask)];
+            leaf = count1_book[
+                (leaf >> 3) + (try huffmanIndex(&reader, 4 + extra) & mask)
+            ];
         }
-        reader.position += leaf & 7;
         // minimp3 checks codeword end before reading its sign bits
-        if (reader.position > bit_limit) break;
+        // An incomplete final count1 group belongs to granule stuffing.
+        const code_bits = leaf & 7;
+        if (code_bits > reader.remaining()) break;
+        const sign_bits = @popCount(leaf & 0xf0);
+        if (@as(usize, code_bits) + sign_bits > reader.remaining()) break;
+        try reader.advance(code_bits);
         for (0..4) |component| {
             if (component % 2 == 0) {
                 // each band length counts pairs, a group can cross into next band
@@ -536,8 +550,11 @@ fn decodeHuffman(
                 }
             }
             if (leaf & (@as(u8, 128) >> @as(u3, @intCast(component))) != 0) {
-                output[sample] = if (reader.peek(1) != 0) -scale else scale;
-                reader.position += 1;
+                output[sample] = if ((try reader.peek(1)) != 0)
+                    -scale
+                else
+                    scale;
+                try reader.advance(1);
             }
             sample += 1;
         }
@@ -912,27 +929,30 @@ fn decodeGranule(
     scratch: *Scratch,
     granules: []const Granule,
     channels: u16,
-) void {
+) (Error || bit_reader.Error)!void {
     const header = Header{ .bytes = state.header };
     for (granules[0..channels], 0..) |*granule, channel| {
         // declared length includes both scalefactor and huffman bits
         const bit_limit = scratch.main_bits.position + granule.part_23_length;
-        decodeScalefactors(
+        var channel_bits = scratch.main_bits;
+        channel_bits.limit = bit_limit;
+        try decodeScalefactors(
             header,
             &scratch.ist_pos[channel],
-            &scratch.main_bits,
+            &channel_bits,
             granule,
             &scratch.scf,
         );
         const samples = scratch.grbuf[channel * 576..][0..576];
         // huffman decoder leaves reader at next channel boundary
-        decodeHuffman(
+        try decodeHuffman(
             samples,
-            &scratch.main_bits,
+            &channel_bits,
             granule,
             &scratch.scf,
             bit_limit,
         );
+        scratch.main_bits.position = bit_limit;
     }
 
     // rebuild left and right frequency values before transforming either channel

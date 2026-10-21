@@ -376,6 +376,7 @@ fn applyFormat(self: *Decoder) Error!void {
     }
     self.format = format;
     self.pending_format = null;
+    self.metadata.channel_mask = format.channel_mask;
     self.metadata.channels = format.channels;
     self.metadata.sample_rate = format.sample_rate;
     self.metadata.total_frames = null;
@@ -424,13 +425,17 @@ fn acceptBlock(self: *Decoder, block: types.AudioBlock) Error!void {
 }
 
 /// seek to a presented frame; success clears prior input errors
-/// unsupported seeking leaves decoder state unchanged
+/// unsupported seeking and known range rejections leave decoder state unchanged
 pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
     if (!self.packets.seekable) return error.Unseekable;
     if (self.metadata.total_frames) |total| {
         if (frame > total) return error.OutOfRange;
     }
-    self.seekInternal(frame) catch |err| {
+    // translate presented frame to untrimmed decode timeline
+    const target = std.math.add(u64, self.presentation.start, frame)
+        catch return error.OutOfRange;
+    if (target > std.math.maxInt(i64)) return error.OutOfRange;
+    self.seekInternal(target) catch |err| {
         self.failure = err;
         return err;
     };
@@ -439,14 +444,14 @@ pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
 }
 
 /// reset at indexed anchor, decode preroll and retain output at target
-fn seekInternal(self: *Decoder, frame: u64) Error!void {
-    // translate presented frame to untrimmed decode timeline
-    const target = std.math.add(u64, self.presentation.start, frame)
-        catch return error.OutOfRange;
+fn seekInternal(self: *Decoder, target: u64) Error!void {
     // start early enough to rebuild codec history, saturate before frame zero
-    const anchor = try self.packets.seek(target -| self.codec.preroll_frames);
+    const origin: u64 = @intCast(@max(0, self.packets.decoded_origin));
+    const anchor = try self.packets.seek(
+        @max(origin, target -| self.codec.preroll_frames),
+    );
     if (@as(i128, anchor.frame) > target) return error.InvalidState;
-    self.codec.reset();
+    try self.codec.reset();
     self.pending = &.{};
     self.deferred_block = null;
     self.silence = 0;

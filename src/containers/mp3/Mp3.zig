@@ -3,6 +3,7 @@
 //! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0).
 const std = @import("std");
 const types = @import("../../types.zig");
+const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
 const PacketSource = @import("../../PacketSource.zig");
 const framing = @import("framing.zig");
@@ -13,6 +14,8 @@ pub const Error = types.Error;
 
 allocator: std.mem.Allocator,
 source: Source,
+/// true only when initialization built an index using seek and size support
+seekable: bool = false,
 options: types.Options,
 buffer: []u8 = &.{},
 // valid buffer bytes, unread audio starts at consumed
@@ -126,6 +129,7 @@ pub fn init(
     // sequential sources continue from current buffer
     const seekable = source.seek_to != null and try source.getSize() != null;
     if (seekable) try self.buildIndex();
+    self.seekable = seekable;
     return .{
         .backend = .{ .mp3 = self },
         .encoding = .mp3,
@@ -270,15 +274,22 @@ pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
+/// report whether an index supports frame seeking
+pub fn canSeek(self: *const Self) bool {
+    return self.seekable;
+}
+
 /// seek at or before untrimmed target with reservoir and synthesis history
 /// return decoded origin, caller resets codec and discards samples before target
 /// errors may advance input, requires configuration and a populated index
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
-    if (self.source.seek_to == null) return error.Unseekable;
-    if (!self.configured) return error.InvalidState;
-    if (self.presentation.end orelse self.metadata.total_frames) |end| {
-        if (frame > end) return error.OutOfRange;
-    }
+    try PacketSource.validateSeek(
+        self.configured,
+        self.canSeek(),
+        frame,
+        0,
+        self.presentation.end orelse self.metadata.total_frames,
+    );
     var selected = self.index.indexAtOrBefore(frame)
         orelse return error.InvalidState;
     const entries = self.index.entries.items;
@@ -331,27 +342,7 @@ pub fn deinit(self: *Self) void {
 /// compact consumed bytes and refill; return whether new bytes were read
 /// false can leave buffered bytes available for the caller to inspect
 fn fill(self: *Self) Error!bool {
-    if (self.eof) return false;
-    // preserve unread bytes, including a frame split across reads
-    const remaining = self.length - self.consumed;
-    // move buffer origin by discarded bytes, unread audio keeps absolute position
-    self.offset = std.math.add(u64, self.offset, self.consumed)
-        catch return error.InvalidData;
-    std.mem.copyForwards(
-        u8,
-        self.buffer[0..remaining],
-        self.buffer[self.consumed..self.length],
-    );
-    self.length = remaining;
-    self.consumed = 0;
-    // unread data already occupies the entire configured buffer
-    if (self.length == self.buffer.len) return error.LimitExceeded;
-    const space = self.buffer[self.length..];
-    const count = try self.source.reader.readSliceShort(space);
-    self.length += count;
-    // readSliceShort fills the requested space unless it reaches eof
-    self.eof = count < space.len;
-    return count != 0;
+    return input_helpers.refill(self);
 }
 
 /// skip consecutive leading id3v2 tags, large tags consumed in chunks

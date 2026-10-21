@@ -1,6 +1,7 @@
 //! decode packets into pcm; select codecs and adapt byte streams
 const std = @import("std");
 const types = @import("types.zig");
+const input_helpers = @import("input.zig");
 const pcm = @import("codecs/pcm.zig");
 const features = @import("build_options");
 const Codec = @This();
@@ -16,6 +17,7 @@ preroll_frames: u64 = 0,
 const Backend = union(enum) {
     pcm: if (features.pcm) *UnitAdapter(pcm) else void,
     mp3: if (features.mp3) *UnitAdapter(@import("codecs/mp3.zig")) else void,
+    flac: if (features.flac) *UnitAdapter(@import("codecs/flac.zig")) else void,
     opus: if (features.opus) *UnitAdapter(@import("codecs/opus.zig")) else void,
     vorbis: if (features.vorbis)
         *UnitAdapter(@import("codecs/vorbis.zig"))
@@ -42,6 +44,11 @@ pub fn init(
             if (!features.mp3) return error.UnsupportedEncoding;
             return @import("codecs/mp3.zig").init(allocator, format, options);
         },
+        .flac => |config| {
+            if (!features.flac) return error.UnsupportedEncoding;
+            return @import("codecs/flac.zig")
+                .init(allocator, config, format, options);
+        },
         .opus => |config| {
             if (!features.opus) return error.UnsupportedEncoding;
             return @import("codecs/opus.zig")
@@ -56,7 +63,24 @@ pub fn init(
     };
 }
 
+/// validate channel-aligned output before decoding or modifying history
+/// buffer errors leave output and codec state unchanged
+pub fn validateOutput(
+    output: []f32,
+    channels: u16,
+    max_frames: usize,
+) Error!void {
+    if (channels == 0) return error.InvalidState;
+    if (
+        output.len == 0
+            or output.len % channels != 0
+            or output.len / channels < max_frames
+    )
+        return error.InvalidBufferSize;
+}
+
 /// consume or copy packet bytes before accepting them
+/// after a data or backend failure, discard output and reset successfully or reopen
 pub fn submit(self: *Codec, packet: types.Packet) Error!types.Submit {
     // inline dispatch preserves each adapter type
     return switch (self.backend) {
@@ -80,18 +104,20 @@ pub fn receive(self: *Codec) Error!types.Receive {
 /// end input and drain delayed output
 pub fn finish(self: *Codec) Error!void {
     switch (self.backend) {
-        inline else => |backend| if (@TypeOf(backend) != void) {
-                try backend.finish();
-            },
+        inline else => |backend| if (@TypeOf(backend) == void)
+                return error.InvalidState
+            else
+                try backend.finish(),
     }
 }
 
-/// clear output and history; keep configuration
-pub fn reset(self: *Codec) void {
+/// clear output and history; keep configuration; failure requires recovery or reopening
+pub fn reset(self: *Codec) Error!void {
     switch (self.backend) {
-        inline else => |backend| if (@TypeOf(backend) != void) {
-                backend.reset();
-            },
+        inline else => |backend| if (@TypeOf(backend) == void)
+                return error.InvalidState
+            else
+                try backend.reset(),
     }
 }
 
@@ -235,10 +261,10 @@ pub fn UnitAdapter(comptime Unit: type) type {
         }
 
         /// discard pending output and decoding history
-        fn reset(self: *Self) void {
+        fn reset(self: *Self) Error!void {
+            try self.unit.reset();
             self.pending = null;
             self.draining = false;
-            self.unit.reset();
         }
 
         /// free unit state, output storage and adapter
@@ -303,15 +329,7 @@ pub const Framer = struct {
 
     /// discard emitted bytes while retaining incomplete final unit
     fn compact(self: *Framer) void {
-        if (self.consumed != 0) {
-            std.mem.copyForwards(
-                u8,
-                self.buffer[0..self.length - self.consumed],
-                self.buffer[self.consumed..self.length],
-            );
-            self.length -= self.consumed;
-            self.consumed = 0;
-        }
+        input_helpers.compact(self.buffer, &self.length, &self.consumed);
     }
 
     /// discard buffered bytes after seeking

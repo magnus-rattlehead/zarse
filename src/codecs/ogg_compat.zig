@@ -23,6 +23,13 @@ fn initReader(buffer: *const Buffer) Reader {
     return reader;
 }
 
+/// mark reader exhausted using libogg cursor convention
+fn exhaustReader(reader: *Reader) void {
+    reader.state.endByte = reader.state.buffer.len;
+    reader.state.endBit = 1;
+    reader.state.failed = true;
+}
+
 /// borrow c owned allocation for zig writer operations
 fn initWriter(buffer: *const Buffer) Writer {
     const memory: ?[]u8 = if (buffer.buffer != null and buffer.storage > 0)
@@ -89,7 +96,7 @@ export fn oggpack_readinit(
 export fn oggpack_look(buffer: *Buffer, width: c_int) c_long {
     if (width < 0 or width > 32) return -1;
     const reader = initReader(buffer);
-    return toCLong(reader.peek(@intCast(width)));
+    return toCLong(reader.peek(@intCast(width)) catch return -1);
 }
 
 /// peek one bit
@@ -102,7 +109,10 @@ export fn oggpack_read(buffer: *Buffer, width: c_int) c_long {
     var reader = initReader(buffer);
     var bits_value: ?u32 = null;
     if (width >= 0 and width <= 32) {
-        bits_value = reader.read(@intCast(width));
+        bits_value = reader.read(@intCast(width)) catch blk: {
+            exhaustReader(&reader);
+            break :blk null;
+        };
     } else {
         // match libogg exhausted state, cursor one bit past buffer
         reader.state.endByte = reader.state.buffer.len;
@@ -127,7 +137,7 @@ export fn oggpack_adv(buffer: *Buffer, count: c_int) void {
         reader.state.endBit = 1;
         reader.state.failed = true;
     } else {
-        reader.advance(@intCast(count));
+        reader.advance(@intCast(count)) catch exhaustReader(&reader);
     }
     saveReader(buffer, reader);
 }
@@ -181,7 +191,11 @@ export fn oggpack_write(buffer: *Buffer, value: c_ulong, width: c_int) void {
     }
     var writer = initWriter(buffer);
     // zig writer clears allocation on failure, publish resulting state
-    writer.write(@truncate(value), @intCast(width)) catch {};
+    writer.write(@truncate(value), @intCast(width)) catch {
+        // C has no error union; publish failure for oggpack_writecheck
+        saveWriter(buffer, writer);
+        return;
+    };
     saveWriter(buffer, writer);
 }
 
@@ -208,7 +222,11 @@ export fn oggpack_writetrunc(buffer: *Buffer, count: c_long) void {
 /// append zero bits to byte boundary, failure clears storage
 export fn oggpack_writealign(buffer: *Buffer) void {
     var writer = initWriter(buffer);
-    writer.alignToByte() catch {};
+    writer.alignToByte() catch {
+        // C has no error union; publish failure for oggpack_writecheck
+        saveWriter(buffer, writer);
+        return;
+    };
     saveWriter(buffer, writer);
 }
 
@@ -227,6 +245,10 @@ export fn oggpack_writecopy(
     const source_pointer: [*]const u8 = @ptrCast(source.?);
     // round source bit count up to bytes, caller guarantees readable source
     const length = (@as(usize, @intCast(count)) + 7) / 8;
-    writer.copy(source_pointer[0..length], @intCast(count)) catch {};
+    writer.copy(source_pointer[0..length], @intCast(count)) catch {
+        // C has no error union; publish failure for oggpack_writecheck
+        saveWriter(buffer, writer);
+        return;
+    };
     saveWriter(buffer, writer);
 }

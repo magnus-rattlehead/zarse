@@ -2,6 +2,7 @@
 pub const features = @import("build_options");
 pub const types = @import("types.zig");
 pub const parse = if (features.wav) wave.parse else void;
+pub const parseOptions = if (features.wav) wave.parseOptions else void;
 pub const wave64 = if (features.wav) wave.wave64 else void;
 pub const wav = if (features.wav) wave.wav else void;
 pub const Decoder = @import("Decoder.zig");
@@ -30,6 +31,11 @@ pub const Codec = @import("Codec.zig");
 pub const Framer = Codec.Framer;
 pub const OpusConfig = types.OpusConfig;
 pub const VorbisConfig = types.VorbisConfig;
+pub const FlacConfig = types.FlacConfig;
+pub const flac = if (features.flac)
+    @import("containers/flac/root.zig")
+else
+    void;
 pub const wave = if (features.wav)
     @import("containers/wave/root.zig")
 else

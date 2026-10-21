@@ -28,8 +28,15 @@ pub fn init(
 }
 
 /// convert complete frames; output must fit all samples
+/// output must be channel aligned; buffer errors leave state and output unchanged
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     const size = self.format.sample_type.byteSize();
+    try Codec.validateOutput(
+        output,
+        self.channels,
+        bytes.len / size / @max(1, self.channels),
+    );
+    if (bytes.len == 0) return error.InvalidData;
     // reject partial channel frames before converting samples
     if (bytes.len % (size * self.channels) != 0) return error.InvalidData;
     const samples = bytes.len / size;
@@ -44,7 +51,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
 }
 
 /// reset stateless pcm conversion
-pub fn reset(_: *Self) void {}
+pub fn reset(_: *Self) Error!void {}
 
 /// clean up stateless pcm conversion
 pub fn deinit(_: *Self) void {}

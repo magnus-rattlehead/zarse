@@ -28,15 +28,7 @@ pub fn init(
     format: types.AudioFormat,
     options: types.Options,
 ) Error!Codec {
-    if (
-        format.sample_rate != 48000
-            or format.channels == 0
-            or format.channels > 8
-            or config.streams == 0
-            or config.coupled_streams > config.streams
-    ) {
-        return error.InvalidData;
-    }
+    try config.validate(format);
     // query libopus state size for coded stream topology
     const state_bytes = libopus.opus_multistream_decoder_get_size(
         config.streams,
@@ -57,7 +49,7 @@ pub fn init(
         .format = format,
     };
     // map coded channels into the file output order
-    if (
+    try checkResult(
         libopus.opus_multistream_decoder_init(
             unit.state(),
             48000,
@@ -65,10 +57,8 @@ pub fn init(
             config.streams,
             config.coupled_streams,
             &config.mapping,
-        ) != libopus.OPUS_OK
-    ) {
-        return error.InvalidData;
-    }
+        ),
+    );
     // 5760 samples per channel cover the maximum 120 ms packet
     const adapter = try Codec.UnitAdapter(Self)
         .init(allocator, unit, .packets, 5760, format, options);
@@ -77,7 +67,10 @@ pub fn init(
 
 /// decode one packet with header gain; return the frame count
 /// output must hold 5760 samples per channel; the pipeline handles trimming
+/// output must be channel aligned; buffer errors preserve state; input failures require reset before reuse
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
+    try Codec.validateOutput(output, self.format.channels, 5760);
+    if (bytes.len == 0) return error.InvalidData;
     // libopus packet length must fit signed c integer
     const packet_length = std.math.cast(c_int, bytes.len)
         orelse return error.LimitExceeded;
@@ -90,7 +83,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
         5760,
         0,
     );
-    if (decoded_samples < 0) return error.InvalidData;
+    try checkResult(decoded_samples);
     const sample_count: usize = @intCast(decoded_samples);
     // convert fixed point db to amplitude, divide gain by 256 then db by 20
     const gain = std.math.pow(
@@ -106,7 +99,7 @@ pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
 }
 
 /// reset history with the same channels and mapping
-pub fn reset(self: *Self) void {
+pub fn reset(self: *Self) Error!void {
     const result = libopus.opus_multistream_decoder_init(
         self.state(),
         48000,
@@ -115,7 +108,7 @@ pub fn reset(self: *Self) void {
         self.config.coupled_streams,
         &self.config.mapping,
     );
-    std.debug.assert(result == libopus.OPUS_OK);
+    try checkResult(result);
 }
 
 /// free decoder state; the adapter frees its sample buffer
@@ -126,4 +119,19 @@ pub fn deinit(self: *Self) void {
 /// borrow decoder state from aligned storage
 fn state(self: *Self) *libopus.OpusMSDecoder {
     return @ptrCast(self.storage.ptr);
+}
+
+/// translate backend failures without hiding allocation or capacity errors
+fn checkResult(result: c_int) Error!void {
+    if (result >= 0) return;
+    return switch (result) {
+        libopus.OPUS_ALLOC_FAIL => error.OutOfMemory,
+        libopus.OPUS_BUFFER_TOO_SMALL => error.InvalidBufferSize,
+        libopus.OPUS_INVALID_PACKET => error.InvalidData,
+        libopus.OPUS_BAD_ARG,
+        libopus.OPUS_INTERNAL_ERROR,
+        libopus.OPUS_INVALID_STATE,
+        libopus.OPUS_UNIMPLEMENTED => error.InvalidState,
+        else => error.InvalidState,
+    };
 }

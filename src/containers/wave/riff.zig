@@ -1,6 +1,7 @@
 //! parse riff, rifx, rf64, bw64, and wave64 with a shared chunk walker
 const std = @import("std");
 const types = @import("../../types.zig");
+const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
 const declarations = @This();
 pub const Error = types.ParserError;
@@ -23,11 +24,7 @@ fn readExact(
     reader: *std.Io.Reader,
     out: []u8,
 ) (types.ReadError || error{ TruncatedData })!void {
-    reader.readSliceAll(out)
-        catch |err| return switch (err) {
-            error.EndOfStream => error.TruncatedData,
-            else => |read_error| read_error,
-        };
+    return input_helpers.readRequired(reader, out);
 }
 
 /// outer riff chunk size and form identifier
@@ -132,6 +129,18 @@ pub const FormatChunk = struct {
     /// extra format data, or null if absent
     extension: ?FormatExtension = null,
     byte_order: std.builtin.Endian = .little,
+
+    /// preserve an explicit speaker mask, zero means unspecified source order
+    pub fn channelMask(self: FormatChunk) ?u32 {
+        const extension = self.extension orelse return null;
+        return switch (extension.payload) {
+            .extensible => |ext| if (ext.channel_mask == 0)
+                null
+            else
+                ext.channel_mask,
+            .codec => null,
+        };
+    }
 
     /// resolve standard subtypes; preserve unknown tags
     /// return null for custom or missing subtypes
@@ -486,7 +495,7 @@ pub fn Reader(comptime streaming: bool) type {
 
         source: Source,
         allocator: Allocator,
-        options: Options,
+        options: types.Options,
         // absolute input cursor, detection already consumed first four bytes
         position: u64 = 4,
         end: u64 = 0,
@@ -518,6 +527,22 @@ pub fn Reader(comptime streaming: bool) type {
             allocator: Allocator,
             source: Source,
             options: Options,
+            prefix: [4]u8,
+        ) ReadError!Self {
+            return initPrefixOptions(
+                allocator,
+                source,
+                if (streaming) options
+                else .{},
+                prefix,
+            );
+        }
+
+        /// open with uniform metadata limits; scans retain borrowed ranges without allocation
+        pub fn initPrefixOptions(
+            allocator: Allocator,
+            source: Source,
+            options: types.Options,
             prefix: [4]u8,
         ) ReadError!Self {
             var self = Self{
@@ -613,10 +638,10 @@ pub fn Reader(comptime streaming: bool) type {
                             .length = table_length,
                         },
                     };
+                    if (table_length > options.max_payload_bytes) {
+                        return error.LimitExceeded;
+                    }
                     if (streaming) {
-                        if (table_length > options.max_payload_bytes) {
-                            return error.LimitExceeded;
-                        }
                         self.table = try allocator.alloc(
                             u8,
                             @intCast(table_length),
@@ -798,13 +823,10 @@ pub fn Reader(comptime streaming: bool) type {
                 const id = chunk.header.id;
                 if (std.mem.eql(u8, &id, "fmt ") and self.wavl_end == null) {
                     if (self.format != null) return error.InvalidData;
+                    if (chunk.data.length > self.options.bufferCapacity()) {
+                        return error.LimitExceeded;
+                    }
                     if (streaming) {
-                        if (
-                            chunk.data.length > self.options.max_payload_bytes
-                                or chunk.data.length > self.format_bytes.len
-                        ) {
-                            return error.LimitExceeded;
-                        }
                         const bytes = self.format_bytes[
                             0..@intCast(chunk.data.length)
                         ];
@@ -1031,6 +1053,15 @@ fn scan(
     source: Source,
     expected: ?types.Format,
 ) types.ParserError!Reader(false) {
+    return scanOptions(source, expected, .{});
+}
+
+/// scan with explicit metadata budgets and no retained payload allocation
+fn scanOptions(
+    source: Source,
+    expected: ?types.Format,
+    options: types.Options,
+) types.ParserError!Reader(false) {
     try source.seekTo(0);
     var prefix: [4]u8 = undefined;
     if (try source.reader.readSliceShort(&prefix) != prefix.len) {
@@ -1039,7 +1070,8 @@ fn scan(
         else
             error.TruncatedData;
     }
-    var reader = try Reader(false).initPrefix({}, source, {}, prefix);
+    var reader = try Reader(false)
+        .initPrefixOptions({}, source, options, prefix);
     if (expected) |kind| {
         if (reader.kind != kind) return error.UnsupportedFormat;
     }
@@ -1053,7 +1085,15 @@ fn scan(
 
 /// scan wav or wave64 metadata, leave input at first audio data
 pub fn parse(source: Source) types.ParserError!types.ParsedAudio {
-    const reader = try scan(source, null);
+    return parseOptions(source, .{});
+}
+
+/// scan wav or wave64 metadata within the supplied configuration limits
+pub fn parseOptions(
+    source: Source,
+    options: types.Options,
+) types.ParserError!types.ParsedAudio {
+    const reader = try scanOptions(source, null, options);
     return if (reader.kind == .wave64)
         reader.wave64File().audio()
     else
@@ -1115,6 +1155,7 @@ pub const wav = struct {
                     .format = .wav,
                     .sample_rate = self.header.fmt.sample_rate,
                     .channels = self.header.fmt.channels,
+                    .channel_mask = self.header.fmt.channelMask(),
                     .total_frames = self.frameCount(),
                 },
                 .scheme = self.header.fmt.decodingScheme(
@@ -1168,6 +1209,14 @@ pub const wav = struct {
     /// validate headers and layout; leave input at the first audio data
     pub fn parse(source: Source) wav.ParseError!WavFile {
         return (try scan(source, .wav)).wavFile();
+    }
+
+    /// scan riff metadata with explicit format and size-table limits
+    pub fn parseOptions(
+        source: Source,
+        options: types.Options,
+    ) wav.ParseError!WavFile {
+        return (try scanOptions(source, .wav, options)).wavFile();
     }
 };
 
@@ -1231,6 +1280,7 @@ pub const wave64 = struct {
                     .format = .wave64,
                     .sample_rate = self.header.fmt.sample_rate,
                     .channels = self.header.fmt.channels,
+                    .channel_mask = self.header.fmt.channelMask(),
                     .total_frames = self.frameCount(),
                 },
                 .scheme = self.header.fmt.decodingScheme(.little),
@@ -1264,5 +1314,13 @@ pub const wave64 = struct {
     /// validate headers and layout; leave input at the first audio data
     pub fn parse(source: Source) wave64.ParseError!Wave64File {
         return (try scan(source, .wave64)).wave64File();
+    }
+
+    /// scan wave64 metadata with explicit format limits
+    pub fn parseOptions(
+        source: Source,
+        options: types.Options,
+    ) wave64.ParseError!Wave64File {
+        return (try scanOptions(source, .wave64, options)).wave64File();
     }
 };

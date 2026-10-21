@@ -111,7 +111,7 @@ pub fn init(
             if (!try self.loadAudioPage()) break;
         }
         self.metadata.total_frames = self.frame - self.origin;
-        _ = try seek(self, self.origin);
+        _ = try self.seekIndexed(self.origin);
     }
     return .{
         .backend = .{ .ogg = self },
@@ -185,17 +185,37 @@ pub fn info(self: *const Self) types.Info {
 /// seek at or before an untrimmed target with codec preroll subtracted
 /// the decoder resets codec history and discards samples before the target
 pub fn seek(self: *Self, target: u64) Error!PacketSource.SeekResult {
-    if (!self.seekable) return error.Unseekable;
+    const end = self.presentation.end
+        orelse if (self.metadata.total_frames) |total|
+            std.math.add(u64, self.origin, total) catch return error.InvalidData
+        else
+            null;
+    try PacketSource.validateSeek(
+        self.configured,
+        self.canSeek(),
+        target,
+        self.origin,
+        end,
+    );
+    return self.seekIndexed(target);
+}
+
+/// report whether an index supports frame seeking
+pub fn canSeek(self: *const Self) bool {
+    return self.seekable;
+}
+
+/// restore an indexed anchor during opening or configured playback
+fn seekIndexed(self: *Self, target: u64) Error!PacketSource.SeekResult {
     if (self.is_vorbis) return self.seekVorbis(target);
     const entry = self.index.atOrBefore(target)
         orelse return error.InvalidState;
+    const origin = std.math.cast(i64, entry.frame)
+        orelse return error.InvalidData;
     try self.pages.seek(entry.location);
     self.frame = entry.frame;
     self.bounds_pending = false;
-    return .{
-        .frame = std.math.cast(i64, entry.frame)
-            orelse return error.InvalidData,
-    };
+    return .{ .frame = origin };
 }
 
 /// free owned storage; leave borrowed input open
@@ -270,31 +290,16 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
             }
             self.config.streams = packet_bytes[19];
             self.config.coupled_streams = packet_bytes[20];
-            // coupled streams add one extra coded channel each
-            if (
-                packet_bytes[19] == 0
-                    or packet_bytes[20] > packet_bytes[19]
-                    or @as(u16, packet_bytes[19]) + packet_bytes[20] > 255
-            ) {
-                return error.InvalidData;
-            }
             @memcpy(
                 self.config.mapping[0..channels],
                 packet_bytes[21..][0..channels],
             );
-            // map value 255 requests silence
-            for (self.config.mapping[0..channels]) |channel_index| {
-                if (
-                    channel_index != 255
-                        and channel_index >= @as(u16, packet_bytes[19])
-                                + packet_bytes[20]
-                ) {
-                    return error.InvalidData;
-                }
-            }
         },
         else => return error.UnsupportedEncoding,
     }
+    try self.config.validate(
+        .{ .sample_rate = self.metadata.sample_rate, .channels = channels },
+    );
 }
 
 /// validate vendor and comment lengths; allow trailing padding
@@ -617,12 +622,11 @@ fn seekVorbis(self: *Self, target: u64) Error!PacketSource.SeekResult {
     // last packet at or before target, preceding packet restores overlap
     const prime = selected -| 1;
     const anchor = entries[selected].frame;
+    const origin = std.math.cast(i64, anchor) orelse return error.InvalidData;
     try self.pages.seek(entries[prime].location);
     self.frame = anchor;
     self.previous_block = 0;
     self.prime_pending = false;
     self.bounds_pending = false;
-    return .{
-        .frame = std.math.cast(i64, anchor) orelse return error.InvalidData,
-    };
+    return .{ .frame = origin };
 }

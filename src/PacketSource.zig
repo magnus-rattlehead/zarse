@@ -16,6 +16,10 @@ const Mp3 = if (features.mp3)
 else
     void;
 const PacketSource = @This();
+const Flac = if (features.flac)
+    @import("containers/flac/root.zig").Reader
+else
+    void;
 
 pub const Error = types.Error;
 
@@ -24,10 +28,12 @@ const Backend = union(enum) {
     wave: if (features.wav) *Wave else void,
     ogg: if (features.ogg) *Ogg else void,
     mp3: if (features.mp3) *Mp3 else void,
+    flac: if (features.flac) *Flac else void,
 };
 const containers = (if (features.wav) .{Wave} else .{})
     ++ (if (features.ogg) .{Ogg} else .{})
-    ++ (if (features.mp3) .{Mp3} else .{});
+    ++ (if (features.mp3) .{Mp3} else .{})
+    ++ (if (features.flac) .{Flac} else .{});
 
 backend: Backend,
 encoding: types.DecodingScheme,
@@ -91,12 +97,15 @@ pub fn configure(self: *PacketSource, scheme: types.InputScheme) Error!void {
     switch (self.backend) {
         inline else => |container| if (@TypeOf(container) == void)
                 return error.InvalidState
-            else
-                try container.configure(scheme),
+            else {
+                try container.configure(scheme);
+                self.seekable = container.canSeek();
+            },
     }
 }
 
 /// borrow a packet until the next advancing source operation
+/// data and input failures require successful seeking or reopening before reuse
 pub fn next(self: *PacketSource) Error!Event {
     const event = switch (self.backend) {
         inline else => |container| if (@TypeOf(container) == void)
@@ -124,9 +133,26 @@ pub fn info(self: *const PacketSource) types.Info {
     };
 }
 
-/// seek at or before a frame, preserving prior data needed for held silence
+/// reject predictable seek failures before changing input or parser state
+pub fn validateSeek(
+    configured: bool,
+    seekable: bool,
+    frame: u64,
+    origin: u64,
+    end: ?u64,
+) Error!void {
+    if (!configured) return error.InvalidState;
+    if (!seekable) return error.Unseekable;
+    if (frame < origin or frame > std.math.maxInt(i64)) return error.OutOfRange;
+    if (end) |limit| {
+        if (frame > limit) return error.OutOfRange;
+    }
+}
+
+/// seek at or before an untrimmed frame, preserving prior data needed for held silence
+/// configuration, capability, and known range rejections leave state unchanged
+/// input failures may advance state and require successful seeking or reopening
 pub fn seek(self: *PacketSource, frame: u64) Error!SeekResult {
-    if (!self.seekable) return error.Unseekable;
     return switch (self.backend) {
         inline else => |container| if (@TypeOf(container) == void)
                 error.InvalidState
