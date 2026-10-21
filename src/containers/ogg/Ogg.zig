@@ -11,7 +11,7 @@ const VorbisComments = @import("../VorbisComments.zig");
 const Self = @This();
 
 pub const Error = types.Error;
-const codec_options = @import("codec_options");
+const codec_options = @import("build_options");
 const Vorbis = if (codec_options.vorbis)
     @import("../../codecs/vorbis.zig")
 else

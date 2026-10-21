@@ -2,8 +2,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const pcm = @import("codecs/pcm.zig");
-const opus_enabled = @import("codec_options").opus;
-const vorbis_enabled = @import("codec_options").vorbis;
+const features = @import("build_options");
 const Codec = @This();
 
 pub const Error = types.Error;
@@ -15,10 +14,10 @@ preroll_frames: u64 = 0,
 
 /// owned adapters selected by enabled codec backends
 const Backend = union(enum) {
-    pcm: *UnitAdapter(pcm),
-    mp3: *UnitAdapter(@import("codecs/mp3.zig")),
-    opus: if (opus_enabled) *UnitAdapter(@import("codecs/opus.zig")) else void,
-    vorbis: if (vorbis_enabled)
+    pcm: if (features.pcm) *UnitAdapter(pcm) else void,
+    mp3: if (features.mp3) *UnitAdapter(@import("codecs/mp3.zig")) else void,
+    opus: if (features.opus) *UnitAdapter(@import("codecs/opus.zig")) else void,
+    vorbis: if (features.vorbis)
         *UnitAdapter(@import("codecs/vorbis.zig"))
     else
         void,
@@ -35,15 +34,21 @@ pub fn init(
         return error.InvalidData;
     }
     return switch (scheme) {
-        .pcm => |config| pcm.init(allocator, config, format, options),
-        .mp3 => @import("codecs/mp3.zig").init(allocator, format, options),
+        .pcm => |config| {
+            if (!features.pcm) return error.UnsupportedEncoding;
+            return pcm.init(allocator, config, format, options);
+        },
+        .mp3 => {
+            if (!features.mp3) return error.UnsupportedEncoding;
+            return @import("codecs/mp3.zig").init(allocator, format, options);
+        },
         .opus => |config| {
-            if (!opus_enabled) return error.UnsupportedEncoding;
+            if (!features.opus) return error.UnsupportedEncoding;
             return @import("codecs/opus.zig")
                 .init(allocator, config, format, options);
         },
         .vorbis => |config| {
-            if (!vorbis_enabled) return error.UnsupportedEncoding;
+            if (!features.vorbis) return error.UnsupportedEncoding;
             return @import("codecs/vorbis.zig")
                 .init(allocator, config, format, options);
         },

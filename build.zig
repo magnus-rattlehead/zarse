@@ -11,6 +11,13 @@ pub fn build(builder: *std.Build) !void {
             .optimize = optimize,
         },
     );
+    const wav = builder.option(bool, "wav", "Enable WAV and Wave64 containers")
+        orelse true;
+    const ogg = builder.option(bool, "ogg", "Enable the Ogg container")
+        orelse true;
+    const mp3 = builder.option(bool, "mp3", "Enable MP3 streams and decoding")
+        orelse true;
+    const pcm = builder.option(bool, "pcm", "Enable PCM decoding") orelse true;
     const opus = builder.option(bool, "opus", "Enable the libopus backend")
         orelse true;
     const vorbis = builder.option(
@@ -20,9 +27,13 @@ pub fn build(builder: *std.Build) !void {
     )
         orelse true;
     const options = builder.addOptions();
+    options.addOption(bool, "wav", wav);
+    options.addOption(bool, "ogg", ogg);
+    options.addOption(bool, "mp3", mp3);
+    options.addOption(bool, "pcm", pcm);
     options.addOption(bool, "opus", opus);
     options.addOption(bool, "vorbis", vorbis);
-    module.addOptions("codec_options", options);
+    module.addOptions("build_options", options);
     if (opus) {
         if (builder.lazyDependency("opus", .{})) |dep| {
             @import("build/opus.zig").add(builder, module, dep);

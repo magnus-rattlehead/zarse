@@ -1,7 +1,6 @@
 # zigaudioparser
 
-A small audio reading library for **Zig 0.16.0**, developing native Zig container readers and
-codecs.
+A small audio reading library for **Zig 0.16.0** codecs.
 
 ## Quick start
 
@@ -10,14 +9,26 @@ zig build
 zig build run -- path/to/audio.wav
 ```
 
+All container and codec support is enabled by default. Disable features for smaller builds with
+`-Dfeature=false`:
+
 ```sh
-zig build -Dopus=false -Dvorbis=false  # dependency-free pcm build
-zig build run -- path/to/audio.ogg
+# MP3 only
+zig build -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false
+zig build run -Dwav=false -Dogg=false -Dpcm=false -Dopus=false -Dvorbis=false -- path/to/audio.mp3
+
+# WAV/PCM only
+zig build -Dogg=false -Dmp3=false -Dopus=false -Dvorbis=false
+
+# Ogg Opus only
+zig build -Dwav=false -Dmp3=false -Dpcm=false -Dvorbis=false
 ```
 
 ## Roadmap
 
 The goal is to read, decode, convert, encode, and write mainstream audio formats.
+
+### Documentation and testing
 
 - [ ] create man pages
 - [ ] create unit tests
@@ -29,9 +40,8 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [x] RIFX.
 - [x] Wave64.
 - [x] Segmented RIFF/RIFX audio (`LIST/wavl`, `data`, `slnt`).
-- [ ] Compressed WAVE codec mapping and configuration (IMA ADPCM, Microsoft ADPCM, MP3).
-- [ ] Compressed block and packet framing.
-- [ ] Compressed audio timing, decoded sample trimming, and seeking.
+- [ ] Compressed WAVE support (IMA ADPCM, Microsoft ADPCM, MP3), including framing, timing,
+      trimming, and seeking.
 - [ ] Preserve extensible channel masks for seekable input.
 
 ### Ogg container
@@ -42,40 +52,12 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [ ] Recovery after damaged or missing pages.
 - [ ] Ogg FLAC mapping.
 
-### Decoder support
+### Audio processing and output
 
-- [x] PCM sample conversion to interleaved float32.
-- [x] Ogg Opus and Vorbis packet framing and codec configuration.
-- [x] PCM, Opus, and Vorbis state reset and seeking on seekable input.
-- [x] Ogg Opus and Vorbis leading and trailing sample trimming, including Opus pre-skip.
-- [x] Opus channel mapping and format-defined output gain.
-- [ ] Framing and configuration for additional codecs.
-- [ ] Compressed block decoding across reads.
-- [ ] Decoder delay and end padding for additional codecs.
-- [ ] Channel mapping and format-defined output gain for additional codecs.
-
-### Audio conversion
-
-- [ ] Configurable PCM output: integer and floating-point samples, bit depth, and byte order.
-- [ ] Interleaved and planar sample layouts.
-- [ ] Sample rate conversion with anti-aliasing and resampler delay handling.
-- [ ] Channel reordering, mono/stereo conversion, and multichannel downmixing.
-- [ ] Integer quantization, clipping control, and optional dithering when reducing precision.
-- [ ] Preserve timing and sample counts across conversion and partial reads.
-
-### Encoder and container writing support
-
-- [ ] Encode PCM input to supported output codecs.
-- [ ] Codec settings: bitrate, quality, rate control, and compression level where applicable.
-- [ ] Validate codec, container, sample rate, channel layout, and sample format compatibility.
-- [ ] Buffer encoder frames across writes and flush delayed packets at end of input.
-- [ ] Record encoder delay, pre-skip, end padding, and packet timestamps where applicable.
-- [ ] Write raw PCM with caller supplied sample format.
-- [ ] Write encoded packets to compatible containers and streams.
-- [ ] Finalize headers, sizes, sample counts, checksums, and seek indexes where applicable.
-- [ ] Handle seekable output and streaming output where the format allows it.
-- [ ] Write basic tags and embedded artwork where supported.
-- [ ] Copy encoded packets between compatible containers without decoding.
+- [ ] Audio conversion: sample formats and layouts, resampling, channel mixing, and dithering,
+      preserving timing and sample counts.
+- [ ] Encoder and container writing support: codec settings, streaming, finalization, metadata, and
+      remuxing.
 
 ### Metadata
 
@@ -95,7 +77,7 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [ ] DTS.
 - [ ] EAC3.
 - [ ] FLAC.
-- [ ] MP3.
+- [x] MP3 (MPEG-1 Layer III decoder, MPEG2 and 2.5 still TODO).
 - [ ] Mu-law.
 - [x] Opus (temporary libopus backend).
 - [x] Vorbis (temporary libvorbis backend).
@@ -104,8 +86,8 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 
 ### Common audio containers and streams
 
-- [ ] MP3 streams.
-- [ ] Ogg container.
+- [x] MP3 streams
+- [x] Ogg container (Opus and Vorbis; remaining work above).
 - [ ] ADTS.
 - [ ] FLAC.
 - [ ] M4A.

@@ -2,16 +2,32 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @import("Source.zig");
-const Wave = @import("containers/wave/root.zig").Reader;
-const Ogg = @import("containers/ogg/root.zig").Reader;
-const Mp3 = @import("containers/mp3/root.zig").Reader;
+const features = @import("build_options");
+const Wave = if (features.wav)
+    @import("containers/wave/root.zig").Reader
+else
+    void;
+const Ogg = if (features.ogg)
+    @import("containers/ogg/root.zig").Reader
+else
+    void;
+const Mp3 = if (features.mp3)
+    @import("containers/mp3/root.zig").Reader
+else
+    void;
 const PacketSource = @This();
 
 pub const Error = types.Error;
 
 /// owned container state selected during detection
-const Backend = union(enum) { wave: *Wave, ogg: *Ogg, mp3: *Mp3 };
-const containers = .{ Wave, Ogg, Mp3 };
+const Backend = union(enum) {
+    wave: if (features.wav) *Wave else void,
+    ogg: if (features.ogg) *Ogg else void,
+    mp3: if (features.mp3) *Mp3 else void,
+};
+const containers = (if (features.wav) .{Wave} else .{})
+    ++ (if (features.ogg) .{Ogg} else .{})
+    ++ (if (features.mp3) .{Mp3} else .{});
 
 backend: Backend,
 encoding: types.DecodingScheme,
@@ -66,20 +82,27 @@ pub fn initParsed(
     parsed: types.ParsedAudio,
     options: types.Options,
 ) Error!PacketSource {
+    if (!features.wav) return error.UnsupportedFormat;
     return Wave.initParsed(allocator, source, parsed, options);
 }
 
 /// set framing before requesting packets
 pub fn configure(self: *PacketSource, scheme: types.InputScheme) Error!void {
     switch (self.backend) {
-        inline else => |container| try container.configure(scheme),
+        inline else => |container| if (@TypeOf(container) == void)
+                return error.InvalidState
+            else
+                try container.configure(scheme),
     }
 }
 
 /// borrow a packet until the next advancing source operation
 pub fn next(self: *PacketSource) Error!Event {
     const event = switch (self.backend) {
-        inline else => |container| try container.next(),
+        inline else => |container| if (@TypeOf(container) == void)
+                return error.InvalidState
+            else
+                try container.next(),
     };
     // enforce shared packet limits before codec sees borrowed bytes
     if (event == .packet) {
@@ -94,7 +117,10 @@ pub fn next(self: *PacketSource) Error!Event {
 /// return metadata with untrimmed frame counts
 pub fn info(self: *const PacketSource) types.Info {
     return switch (self.backend) {
-        inline else => |container| container.info(),
+        inline else => |container| if (@TypeOf(container) == void)
+                unreachable
+            else
+                container.info(),
     };
 }
 
@@ -102,14 +128,19 @@ pub fn info(self: *const PacketSource) types.Info {
 pub fn seek(self: *PacketSource, frame: u64) Error!SeekResult {
     if (!self.seekable) return error.Unseekable;
     return switch (self.backend) {
-        inline else => |container| container.seek(frame),
+        inline else => |container| if (@TypeOf(container) == void)
+                error.InvalidState
+            else
+                container.seek(frame),
     };
 }
 
 /// free packet storage and parser state; leave input open
 pub fn deinit(self: *PacketSource) void {
     switch (self.backend) {
-        inline else => |container| container.deinit(),
+        inline else => |container| if (@TypeOf(container) != void) {
+                container.deinit();
+            },
     }
     self.* = undefined;
 }
