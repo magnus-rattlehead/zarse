@@ -402,7 +402,8 @@ pub const Floor1 = struct {
                     if (high_room > low_room) {
                         final_y[index] = value - low_room + predicted;
                     } else {
-                        final_y[index] = predicted - value + high_room - 1;
+                        // Add headroom first so the intermediate cannot underflow.
+                        final_y[index] = predicted + high_room - value - 1;
                     }
                 } else if (value & 1 == 1) {
                     final_y[index] = predicted - ((value + 1) / 2);
