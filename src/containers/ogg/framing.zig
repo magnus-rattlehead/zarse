@@ -27,8 +27,8 @@ pub const Page = struct {
 
     /// validate borrowed page layout, checksum and version checked separately
     pub fn init(header: []const u8, body: []const u8) Error!Page {
-        // header, signature 4 bytes, version 1 bytes, flags 1 bytes, granule 8 bytes
-        // serial 4 bytes, sequence 4 bytes, crc 4 bytes, segment count 1 bytes
+        // header: 4 signature bytes, version, flags, i64 granule,
+        // u32 serial, u32 sequence, u32 crc, then segment count
         if (header.len < 27 or !std.mem.eql(u8, header[0..4], "OggS"))
             return error.InvalidData;
         // byte 26 counts laces after the fixed header
@@ -66,7 +66,7 @@ pub const Page = struct {
     }
     /// identifier of logical stream owning this page
     pub fn serial(self: Page) u32 {
-        // the serial identifies the logical stream
+        // serial identifies the logical stream
         return std.mem.readInt(u32, self.header[14..18], .little);
     }
     /// wrapping page sequence within logical stream
@@ -103,7 +103,7 @@ pub const Page = struct {
                 .little,
             );
     }
-    /// the mutable header must be this page borrowed header
+    /// mutable header must be this page borrowed header
     pub fn setChecksum(self: Page, header: []u8) Error!void {
         if (header.ptr != self.header.ptr or header.len != self.header.len)
             return error.InvalidData;
@@ -123,8 +123,8 @@ pub const Packet = struct {
     location: ?Location = null,
 };
 
-/// synchronize pages; report each gap once; views expire on buffer access
-/// reserve, reset, or cleanup, but survive page extraction
+/// synchronize pages and report each gap once, views survive page extraction
+/// and expire on buffer access, reserve, reset or cleanup
 pub const Sync = struct {
     allocator: std.mem.Allocator,
     data: std.ArrayList(u8) = .empty,
@@ -133,7 +133,6 @@ pub const Sync = struct {
     unsynced: bool = false,
     headerBytes: usize = 0,
     bodyBytes: usize = 0,
-    bounded: bool = false,
     // writable bytes remaining in current buffer reservation
     committedCapacity: usize = 0,
 
@@ -146,10 +145,17 @@ pub const Sync = struct {
     /// queued output or need for more input, hole means missing data
     pub const Result = union(enum) { needInput, hole, page: Page };
 
-    /// create empty synchronizer, storage allocated on demand
+    /// create empty synchronizer
     pub fn init(allocator: std.mem.Allocator) Sync {
         return .{ .allocator = allocator };
     }
+    /// transfer synchronization storage; leave self empty and safe to deinit
+    pub fn take(self: *Sync) Sync {
+        const owned = self.*;
+        self.* = .{ .allocator = self.allocator };
+        return owned;
+    }
+
     /// free synchronization storage and clear parser state
     pub fn deinit(self: *Sync) void {
         self.data.deinit(self.allocator);
@@ -184,12 +190,8 @@ pub const Sync = struct {
         }
         const needed = std.math.add(usize, self.data.items.len, size)
             catch return error.Overflow;
-        // bounded playback rejects growth, unbounded sync reserves extra headroom
         if (needed > self.data.capacity) {
-            if (self.bounded) return error.LimitExceeded;
-            const capacity = std.math.add(usize, needed, 4096)
-                catch return error.Overflow;
-            try self.reserve(capacity);
+            return error.LimitExceeded;
         }
         self.committedCapacity = self.data.capacity - self.data.items.len;
         return self.data.unusedCapacitySlice();
@@ -279,7 +281,6 @@ pub const Stream = struct {
     granule: i64 = 0,
     beginning: bool = false,
     ended: bool = false,
-    bounded: bool = false,
     maxPacketBytes: usize = std.math.maxInt(usize),
     header: [282]u8 = undefined,
     // one state cannot mix encoding and decoding before reset
@@ -298,11 +299,28 @@ pub const Stream = struct {
 
     /// allocate stream body and laces for one logical stream
     pub fn init(allocator: std.mem.Allocator, serial: u32) Error!Stream {
+        return initCapacity(allocator, serial, 16 * 1024, 1024);
+    }
+
+    pub fn initCapacity(
+        allocator: std.mem.Allocator,
+        serial: u32,
+        body_bytes: usize,
+        segments: usize,
+    ) Error!Stream {
         var self = Stream{ .allocator = allocator, .serial = serial };
         errdefer self.deinit();
-        try self.reserve(16 * 1024, 1024);
+        try self.reserve(body_bytes, segments);
         return self;
     }
+    /// transfer queues and storage; leave self empty and safe to deinit
+    /// invalidates encoded page header views, which borrow self.header inline
+    pub fn take(self: *Stream) Stream {
+        const owned = self.*;
+        self.* = .{ .allocator = self.allocator, .serial = self.serial };
+        return owned;
+    }
+
     /// free body and lace storage, reset stream queues
     pub fn deinit(self: *Stream) void {
         self.body.deinit(self.allocator);
@@ -378,18 +396,13 @@ pub const Stream = struct {
             self.laceReturned = 0;
         }
     }
-    /// enforce reserved capacity in bounded mode, grow otherwise
-    fn ensure(self: *Stream, bodyBytes: usize, segments: usize) Error!void {
-        if (self.bounded) {
-            if (
-                bodyBytes > self.body.capacity
-                    or segments > self.laces.capacity
-            )
-                return error.LimitExceeded;
-        } else {
-            try self.body.ensureTotalCapacity(self.allocator, bodyBytes);
-            try self.laces.ensureTotalCapacity(self.allocator, segments);
-        }
+    fn ensure(
+        self: *const Stream,
+        bodyBytes: usize,
+        segments: usize,
+    ) Error!void {
+        if (bodyBytes > self.body.capacity or segments > self.laces.capacity)
+            return error.LimitExceeded;
     }
     /// copy a packet; input must not alias stream storage
     pub fn packetIn(self: *Stream, packet: Packet) Error!void {
@@ -454,8 +467,6 @@ pub const Stream = struct {
         if (options.startSegment != 0 and !options.resuming)
             return error.InvalidState;
         self.compact();
-        errdefer self.reset();
-        // allocate before changing queues so failures remain resettable
         const bodyLength = std.math.add(
             usize,
             self.body.items.len,
@@ -469,6 +480,7 @@ pub const Stream = struct {
         )
             catch return error.Overflow;
         try self.ensure(bodyLength, laceLength);
+        errdefer self.reset();
         self.mode = .decode;
         if (
             self.nextSequence == null
@@ -630,8 +642,7 @@ pub const Stream = struct {
             var packets: usize = 0;
             var justCompleted: usize = 0;
             while (count < maximum) : (count += 1) {
-                // prefer a packet boundary past fill with at least four
-                // packets
+                // prefer a packet boundary past fill after at least four packets
                 if (accumulated > fill and justCompleted >= 4) {
                     forced = true;
                     break;

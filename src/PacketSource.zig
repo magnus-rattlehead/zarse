@@ -22,9 +22,14 @@ else
     void;
 
 pub const Error = types.Error;
+const VorbisSetup = if (features.vorbis)
+    @import("codecs/vorbis/root.zig").Setup
+else
+    void;
 
 /// owned container state selected during detection
 const Backend = union(enum) {
+    empty: void,
     wave: if (features.wav) *Wave else void,
     ogg: if (features.ogg) *Ogg else void,
     mp3: if (features.mp3) *Mp3 else void,
@@ -35,13 +40,13 @@ const containers = (if (features.wav) .{Wave} else .{})
     ++ (if (features.mp3) .{Mp3} else .{})
     ++ (if (features.flac) .{Flac} else .{});
 
-backend: Backend,
-encoding: types.DecodingScheme,
-format: types.AudioFormat,
+backend: Backend = .empty,
+encoding: types.DecodingScheme = .unsupported,
+format: types.AudioFormat = .{ .sample_rate = 0, .channels = 0 },
 presentation: types.Presentation = .{},
 /// first decoded sample position before trimming
 decoded_origin: i64 = 0,
-seekable: bool,
+seekable: bool = false,
 max_payload_bytes: usize = 64 * 1024 * 1024,
 
 /// encoded packet or playback control event
@@ -59,6 +64,7 @@ pub const SeekResult = struct { frame: i64 };
 
 /// detect and open a container; allocate buffers and any seek index
 /// seekable input may be indexed; sequential input is parsed incrementally
+/// borrow exclusive reader access until deinit; never close the caller's input
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -90,6 +96,25 @@ pub fn initParsed(
 ) Error!PacketSource {
     if (!features.wav) return error.UnsupportedFormat;
     return Wave.initParsed(allocator, source, parsed, options);
+}
+
+/// transfer container ownership; leave self empty and safe to deinit
+/// finish external packet/header borrows before transferring
+pub fn take(self: *PacketSource) PacketSource {
+    const owned = self.*;
+    self.* = .{};
+    return owned;
+}
+
+/// transfer parsed setup ownership, leaving the container's slot empty
+pub fn takeVorbisSetup(self: *PacketSource) ?VorbisSetup {
+    if (!features.vorbis or !features.ogg) return null;
+    if (self.backend != .ogg) return null;
+    const headers = if (self.backend.ogg.vorbis_headers) |*headers|
+        headers
+    else
+        return null;
+    return headers.takeSetup();
 }
 
 /// set framing before requesting packets
@@ -150,7 +175,7 @@ pub fn validateSeek(
 }
 
 /// seek at or before an untrimmed frame, preserving prior data needed for held silence
-/// configuration, capability, and known range rejections leave state unchanged
+/// config, capability, and known range rejections leave state unchanged
 /// input failures may advance state and require successful seeking or reopening
 pub fn seek(self: *PacketSource, frame: u64) Error!SeekResult {
     return switch (self.backend) {
@@ -168,5 +193,5 @@ pub fn deinit(self: *PacketSource) void {
                 container.deinit();
             },
     }
-    self.* = undefined;
+    self.* = .{};
 }

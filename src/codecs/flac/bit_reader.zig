@@ -142,26 +142,13 @@ pub fn BitReader(comptime endian: Endian, comptime checksum: bool) type {
             if ((first & 0x80) == 0) {
                 value = first;
                 continuation_count = 0;
-            } else if ((first & 0xE0) == 0xC0) {
-                value = first & 0x1F;
-                continuation_count = 1;
-            } else if ((first & 0xF0) == 0xE0) {
-                value = first & 0x0F;
-                continuation_count = 2;
-            } else if ((first & 0xF8) == 0xF0) {
-                value = first & 0x07;
-                continuation_count = 3;
-            } else if ((first & 0xFC) == 0xF8) {
-                value = first & 0x03;
-                continuation_count = 4;
-            } else if ((first & 0xFE) == 0xFC) {
-                value = first & 0x01;
-                continuation_count = 5;
-            } else if (first == 0xFE) {
-                value = 0;
-                continuation_count = 6;
             } else {
-                return error.Utf8OverlongEncoding;
+                const leading = @clz(~first);
+                // FLAC permits up to seven bytes, beyond standard UTF-8.
+                if (leading < 2 or leading > 7)
+                    return error.Utf8OverlongEncoding;
+                continuation_count = @intCast(leading - 1);
+                value = first & (@as(u8, 0x7f) >> @as(u3, @intCast(leading)));
             }
 
             for (0..continuation_count) |_| {

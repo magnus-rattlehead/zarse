@@ -21,7 +21,7 @@ pages: Pages,
 options: types.Options,
 config: types.OpusConfig = .{},
 is_vorbis: bool = false,
-vorbis_headers: if (codec_options.vorbis) ?*Vorbis.Headers else void = if (
+vorbis_headers: if (codec_options.vorbis) ?Vorbis.Headers else void = if (
     codec_options.vorbis
 )
     null
@@ -33,7 +33,7 @@ header_bytes: [3][]const u8 = .{ &.{}, &.{}, &.{} },
 previous_block: u16 = 0,
 /// shift wire granules onto a nonnegative decode timeline
 granule_shift: i128 = 0,
-/// the first audio page may contain only a zero output packet
+/// first audio page may contain only a zero output packet
 initial_prime: []const u8 = &.{},
 prime_location: ?Pages.Location = null,
 prime_pending: bool = false,
@@ -183,7 +183,7 @@ pub fn info(self: *const Self) types.Info {
 }
 
 /// seek at or before an untrimmed target with codec preroll subtracted
-/// the decoder resets codec history and discards samples before the target
+/// decoder resets codec history and discards samples before the target
 pub fn seek(self: *Self, target: u64) Error!PacketSource.SeekResult {
     const end = self.presentation.end
         orelse if (self.metadata.total_frames) |total|
@@ -221,9 +221,8 @@ fn seekIndexed(self: *Self, target: u64) Error!PacketSource.SeekResult {
 /// free owned storage; leave borrowed input open
 pub fn deinit(self: *Self) void {
     if (codec_options.vorbis) {
-        if (self.vorbis_headers) |headers| {
+        if (self.vorbis_headers) |*headers| {
             headers.deinit();
-            self.allocator.destroy(headers);
         }
     }
     for (self.header_bytes) |bytes|
@@ -237,8 +236,8 @@ pub fn deinit(self: *Self) void {
 
 /// validate the identification header; copy mapping, pre skip, and gain
 fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
-    // 19 bytes, signature 8 bytes, version 1 bytes, channels 1 bytes, pre skip 2 bytes
-    // input rate 4 bytes, gain 2 bytes, mapping family 1 bytes
+    // opus head: 8 signature bytes, version, channels, u16 pre skip,
+    // u32 input rate, i16 gain, then mapping family
     if (
         packet_bytes.len < 19
             or !std.mem.eql(u8, packet_bytes[0..8], "OpusHead")
@@ -342,13 +341,13 @@ fn opusDuration(packet_bytes: []const u8) Error!u16 {
             packet_bytes[1] & 63,
     };
     const packet_samples: u32 = @as(u32, samples_per_frame) * frame_count;
-    // 120 ms maximum means 5760 samples at 48 khz
+    // 120 ms max means 5760 samples at 48 khz
     if (frame_count == 0 or packet_samples > 5760) return error.InvalidData;
     return @intCast(packet_samples);
 }
 
 /// read an audio page and calculate untrimmed positions
-/// the granule ends its last completed packet; the final page may trim output
+/// granule ends its last completed packet; the final page may trim output
 fn loadAudioPage(self: *Self) Error!bool {
     if (self.is_vorbis) return self.loadVorbisPage();
     return self.loadOpusPage();
@@ -358,18 +357,16 @@ fn loadAudioPage(self: *Self) Error!bool {
 fn readFirstHeader(self: *Self, bytes: []const u8) Error!void {
     if (std.mem.startsWith(u8, bytes, "\x01vorbis")) {
         if (!codec_options.vorbis) return error.UnsupportedEncoding;
-        // identification header, type 1 bytes, signature 6 bytes, version 4 bytes, channels
-        // 1 bytes, rate 4 bytes, bitrate hints 12 bytes, block sizes 1 bytes, framing 1 bytes
-        // libvorbis validates fields and reads the format
+        // identification header: type, signature, version, channels, rate,
+        // three bitrate hints, block sizes and framing; native headers validate fields
         if (bytes.len != 30) return error.InvalidData;
         self.is_vorbis = true;
-        const headers = try self.allocator.create(Vorbis.Headers);
-        headers.init();
-        self.vorbis_headers = headers;
+        self.vorbis_headers = .{ .allocator = self.allocator };
+        const headers = &self.vorbis_headers.?;
         try self.addVorbisHeader(bytes);
         self.metadata = .{
             .format = .ogg,
-            .sample_rate = std.math.cast(u32, headers.info.rate)
+            .sample_rate = std.math.cast(u32, headers.info.sample_rate)
                 orelse return error.InvalidData,
             .channels = std.math.cast(u16, headers.info.channels)
                 orelse return error.InvalidData,
@@ -406,8 +403,7 @@ fn loadOpusPage(self: *Self) Error!bool {
         while (self.headers < 2 and self.pages.hasPacket()) {
             const packet = self.pages.nextPacket().?;
             if (self.headers == 0) {
-                // the identification packet must be alone on the stream start
-                // page
+                // identification packet must be alone on the stream start page
                 if (
                     self.pages.flags != 2
                         or self.pages.count != 1
@@ -431,8 +427,7 @@ fn loadOpusPage(self: *Self) Error!bool {
                 ) {
                     return error.InvalidData;
                 }
-                // discard a leading broadcast fragment before establishing the
-                // origin
+                // discard a leading broadcast fragment before establishing the origin
                 self.pages.allowMissingPacketStart = true;
             }
             self.headers += 1;
@@ -527,8 +522,7 @@ fn loadVorbisPage(self: *Self) Error!bool {
             );
             self.durations[packet_index] = 0;
             if (self.previous_block != 0) {
-                // each adjacent block contributes a quarter of its size to
-                // output
+                // each adjacent block contributes a quarter of its size to output
                 self.durations[packet_index] = self.previous_block / 4
                     + block_size / 4;
             }

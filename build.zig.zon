@@ -5,11 +5,6 @@
     .fingerprint = 0x90d077e819d685cc,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .vorbis = .{
-            .url = "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz",
-            .hash = "N-V-__8AAIUHYQBni_Cdm8Nx7vX9qaqBKXKy6QUAooC-OoBc",
-            .lazy = true,
-        },
         .opus = .{
             .url = "https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz",
             .hash = "N-V-__8AAADWXwF69u4_iufnV_gwfb3M2ATbbZF-yGFRrEFH",

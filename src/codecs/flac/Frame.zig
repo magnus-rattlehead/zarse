@@ -141,8 +141,21 @@ pub fn init(
 /// Release all resources used by the FLAC frame.
 ///
 /// * `allocator` - The original allocator used during initialization.
-pub fn deinit(self: Frame, allocator: Allocator) void {
+pub fn deinit(self: *Frame, allocator: Allocator) void {
     allocator.free(self.buffer);
+    self.buffer = &.{};
+    // Subframes borrow this allocation; remove their aliases as well.
+    for (&self.subframes, 0..) |*subframe, channel| subframe.* = .init(channel);
+    self.block_size = 0;
+}
+
+/// Transfer sample storage and its subframe views; leave self safe to deinit.
+pub fn take(self: *Frame) Frame {
+    const owned = self.*;
+    self.buffer = &.{};
+    for (&self.subframes, 0..) |*subframe, channel| subframe.* = .init(channel);
+    self.block_size = 0;
+    return owned;
 }
 
 /// Scan mode shares the structural parser without allocating sample storage.

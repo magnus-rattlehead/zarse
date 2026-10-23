@@ -9,46 +9,21 @@ const State = struct {
     // bit offset within cursor byte
     endBit: u3 = 0,
     buffer: []const u8 = &.{},
-    // null for borrowed readers, owned backing slice for writers
     allocation: ?[]u8 = null,
     allocator: ?std.mem.Allocator = null,
     failed: bool = false,
 };
 
-pub const WriteError = std.mem.Allocator.Error
-    || error{
-        InvalidBitCount,
-        InvalidTruncation,
-        ShortSource,
-        NotWriter,
-        Overflow,
-    };
-const bufferIncrement = 256;
+pub const WriteError = error{
+    InvalidBitCount,
+    InvalidTruncation,
+    ShortSource,
+    NotWriter,
+    Overflow,
+    NoSpaceLeft,
+};
 
-/// allocate initial writer buffer with zeroed first byte
-fn writeInit(
-    state: *State,
-    allocator: std.mem.Allocator,
-) std.mem.Allocator.Error!void {
-    state.* = .{};
-    const memory = try allocator.alloc(u8, bufferIncrement);
-    memory[0] = 0;
-    state.* = .{
-        .buffer = memory,
-        .allocation = memory,
-        .allocator = allocator,
-    };
-}
-
-/// resize owned writer storage and refresh borrowed buffer view
-fn grow(state: *State, size: usize) WriteError!void {
-    const allocator = state.allocator orelse return error.NotWriter;
-    const memory = try allocator.realloc(state.allocation.?, size);
-    state.allocation = memory;
-    state.buffer = memory;
-}
-
-/// append up to 32 bits in selected order, free storage on failure
+/// append up to 32 bits in selected order
 fn writeValue(
     comptime most_significant_first: bool,
     state: *State,
@@ -56,19 +31,16 @@ fn writeValue(
     width: u6,
 ) WriteError!void {
     if (!valid(state)) return error.NotWriter;
-    errdefer clear(state);
     if (width > 32) return error.InvalidBitCount;
-    // reserve room for 32 value bits plus partial leading byte
-    if (state.endByte >= state.buffer.len - 4) {
-        try grow(
-            state,
-            std.math.add(usize, state.buffer.len, bufferIncrement)
-                catch return error.Overflow,
-        );
-    }
+    if (width == 0) return;
+    const total: u6 = width + @as(u6, state.endBit);
+    const end = std.math.add(usize, state.endByte, total / 8)
+        catch return error.Overflow;
+    const used = std.math.add(usize, end, @intFromBool(total % 8 != 0))
+        catch return error.Overflow;
+    if (used >= state.buffer.len) return error.NoSpaceLeft;
     // discard value bits outside requested width
     const masked = value & lowMask(width);
-    const total: u6 = width + @as(u6, state.endBit);
     const memory = state.allocation.?;
     // 64 bits hold the value plus its partial byte offset
     const word = if (most_significant_first)
@@ -117,7 +89,7 @@ fn trunc(
         @truncate(@as(u16, 0xff00) >> state.endBit)
     else
         @truncate(lowMask(state.endBit));
-    state.allocation.?[state.endByte] &= keep;
+    if (state.allocation) |memory| memory[state.endByte] &= keep;
 }
 
 /// append zero bits until next byte boundary
@@ -134,7 +106,7 @@ fn writeAlign(
         );
 }
 
-/// append source bits, support overlap with owned output, free on failure
+/// append source bits, support overlap with owned output
 fn writeCopy(
     comptime most_significant_first: bool,
     state: *State,
@@ -142,7 +114,6 @@ fn writeCopy(
     bits: usize,
 ) WriteError!void {
     if (!valid(state)) return error.NotWriter;
-    errdefer clear(state);
     const bytes = bits / 8;
     const trailing: u3 = @truncate(bits);
     if (bytes > source.len or (bytes == source.len and trailing != 0))
@@ -152,56 +123,86 @@ fn writeCopy(
     const end = std.math.add(usize, state.endByte, total / 8)
         catch return error.Overflow;
 
-    // preserve an aliased source across reallocations
-    var input = source;
+    if (bits == 0) return;
+    const used = std.math.add(usize, end, @intFromBool(total % 8 != 0))
+        catch return error.Overflow;
+    if (used >= state.buffer.len) return error.NoSpaceLeft;
     const source_address = @intFromPtr(source.ptr);
     const buffer_address = @intFromPtr(state.buffer.ptr);
     var offset: ?usize = null;
-    if (source.len != 0 and source_address >= buffer_address) {
-        const distance = source_address - buffer_address;
-        if (distance < state.buffer.len) offset = distance;
-    }
-    if (offset) |start| {
+    if (
+        source_address >= buffer_address
+            and source_address - buffer_address < state.buffer.len
+    ) {
+        const start = source_address - buffer_address;
         if (source.len > state.buffer.len - start) return error.ShortSource;
+        offset = start;
     }
-    if (end >= state.buffer.len) {
-        try grow(
-            state,
-            std.math.add(usize, end, bufferIncrement)
-                catch return error.Overflow,
-        );
-        if (offset) |start| input = state.buffer[start..][0..source.len];
+    if (state.endBit != 0 and offset != null) {
+        copyAliased(most_significant_first, state, source, bits, offset.?);
+        return;
     }
+    const tail = if (trailing != 0) source[bytes] else 0;
     // unaligned destination needs bit writes to merge boundary bytes
     if (state.endBit != 0) {
-        // reserve headroom and rebase aliased input after reallocations
         for (0..bytes) |byte_index| {
-            const byte = input[byte_index];
+            const byte = source[byte_index];
             try writeValue(most_significant_first, state, byte, 8);
-            if (offset) |start| input = state.buffer[start..][0..source.len];
         }
     } else {
         const destination = state.allocation.?[state.endByte..][0..bytes];
-        // choose copy direction so overlapping source bytes survive
-        if (@intFromPtr(destination.ptr) <= @intFromPtr(input.ptr)) {
-            std.mem.copyForwards(u8, destination, input[0..bytes]);
-        } else {
-            std.mem.copyBackwards(u8, destination, input[0..bytes]);
-        }
+        @memmove(destination, source[0..bytes]);
         state.endByte += bytes;
         state.allocation.?[state.endByte] = 0;
     }
     // copy remaining source bits from side selected by bit order
     if (trailing != 0) {
         const value = if (most_significant_first)
-            input[bytes] >> @as(u3, @intCast(8 - @as(u4, trailing)))
+            tail >> @as(u3, @intCast(8 - @as(u4, trailing)))
         else
-            input[bytes];
+            tail;
         try writeValue(most_significant_first, state, value, trailing);
     }
 }
 
-/// Peek a complete field, returning an error when it is unavailable.
+fn copyAliased(
+    comptime most_significant_first: bool,
+    state: *State,
+    source: []const u8,
+    bits: usize,
+    offset: usize,
+) void {
+    const memory = state.allocation.?;
+    const backwards = state.endByte >= offset;
+    for (0..bits) |step| {
+        const bit = if (backwards) bits - 1 - step else step;
+        const source_bit: u3 = @truncate(bit);
+        const source_shift = if (most_significant_first)
+            7 - source_bit
+        else
+            source_bit;
+        const value = (source[bit / 8] >> source_shift) & 1;
+        const destination = bit + @as(usize, state.endBit);
+        const destination_bit: u3 = @truncate(destination);
+        const shift = if (most_significant_first)
+            7 - destination_bit
+        else
+            destination_bit;
+        const mask = @as(u8, 1) << shift;
+        const byte = &memory[state.endByte + destination / 8];
+        byte.* = (byte.* & ~mask) | (value << shift);
+    }
+    const total = bits + @as(usize, state.endBit);
+    state.endByte += total / 8;
+    state.endBit = @truncate(total);
+    const keep: u8 = if (most_significant_first)
+        @truncate(@as(u16, 0xff00) >> state.endBit)
+    else
+        @truncate(lowMask(state.endBit));
+    memory[state.endByte] &= keep;
+}
+
+/// peek a complete field, returning an error when it is unavailable
 fn look(
     comptime most_significant_first: bool,
     state: *const State,
@@ -218,7 +219,7 @@ fn look(
     );
 }
 
-/// Read a complete field; errors leave the cursor unchanged.
+/// read a complete field; errors leave the cursor unchanged
 fn readValue(
     comptime most_significant_first: bool,
     state: *State,
@@ -231,7 +232,7 @@ fn readValue(
 
 /// writer still owns usable storage
 fn valid(state: *const State) bool {
-    return state.allocation != null and !state.failed;
+    return state.allocator != null and !state.failed;
 }
 
 /// rewind valid writer, retain capacity
@@ -239,7 +240,7 @@ fn resetState(state: *State) void {
     if (!valid(state)) return;
     state.endByte = 0;
     state.endBit = 0;
-    state.allocation.?[0] = 0;
+    if (state.allocation) |memory| memory[0] = 0;
 }
 
 /// release writer allocation and clear cursor state
@@ -248,7 +249,7 @@ fn clear(state: *State) void {
     state.* = .{};
 }
 
-/// Skip only when the entire requested range is available.
+/// skip only when the entire requested range is available
 fn advanceCursor(state: *State, bits: usize) bit_reader.Error!void {
     if (state.failed or state.endByte > state.buffer.len)
         return error.EndOfStream;
@@ -274,24 +275,14 @@ fn countBits(state: *const State) usize {
 
 /// return written bytes for writers, or the full input for readers
 fn getBytes(state: *const State) []const u8 {
-    return if (state.allocation != null)
+    return if (state.allocator != null)
         state.buffer[0..countBytes(state)]
     else
         state.buffer;
 }
 
-/// Historical libogg-facing reader contracts, retained for reference:
-/// peek up to 32 bits, null if unavailable
-/// read then advance, failed peek marks reader exhausted
-/// skip bits, overflow or insufficient bytes exhaust reader
-/// peek one bit, null when unavailable
-/// failed reads exhaust the reader, matching libogg
-/// consume one bit, null marks exhausted reader
-/// skip bits, mark exhausted if skip exceeds input
-/// whether earlier read or advance exceeded input
-/// Native operations now return errors and preserve the cursor on failure.
-/// select bit order at compile time, little is lsb first, big is msb first
-/// keep borrowed input unchanged while reading
+/// borrow unchanged input with a comptime bit order; little reads lsb first
+/// reads, peeks and skips return errors without moving the cursor on failure
 pub fn BitReader(comptime order: std.builtin.Endian) type {
     return struct {
         const Self = @This();
@@ -307,24 +298,24 @@ pub fn BitReader(comptime order: std.builtin.Endian) type {
             return look(order == .big, &self.state, width);
         }
 
-        /// Peek one bit without moving the cursor.
+        /// peek one bit without moving the cursor
         pub fn peekBit(self: *const Self) bit_reader.Error!u1 {
             const value = try self.peek(1);
             return @intCast(value);
         }
 
-        /// Read a complete field; errors leave the cursor unchanged.
+        /// read a complete field; errors leave the cursor unchanged
         pub fn read(self: *Self, width: u6) bit_reader.Error!u32 {
             return readValue(order == .big, &self.state, width);
         }
 
-        /// Read one bit; errors leave the cursor unchanged.
+        /// read one bit; errors leave the cursor unchanged
         pub fn readBit(self: *Self) bit_reader.Error!u1 {
             const value = try self.read(1);
             return @intCast(value);
         }
 
-        /// Skip bits; errors leave the cursor unchanged.
+        /// skip bits; errors leave the cursor unchanged
         pub fn advance(self: *Self, bits: usize) bit_reader.Error!void {
             try advanceCursor(&self.state, bits);
         }
@@ -344,7 +335,7 @@ pub fn BitReader(comptime order: std.builtin.Endian) type {
             return countBytes(&self.state);
         }
 
-        /// Whether no input remains or the imported C cursor is invalid.
+        /// whether the input is exhausted or the cursor is marked failed
         pub fn isExhausted(self: *const Self) bool {
             return self.state.failed
                 or self.state.endByte == self.state.buffer.len;
@@ -357,18 +348,37 @@ pub fn BitReader(comptime order: std.builtin.Endian) type {
     };
 }
 
-/// own output storage; write or copy failures free it and require
-/// reinitialization
+/// own output storage
 pub fn BitWriter(comptime order: std.builtin.Endian) type {
     return struct {
         const Self = @This();
         state: State = .{},
 
-        /// allocate owned output starting at bit zero
-        pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
-            var self: Self = .{};
-            try writeInit(&self.state, allocator);
-            return self;
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .state = .{ .allocator = allocator } };
+        }
+
+        pub fn reserve(
+            self: *Self,
+            capacity: usize,
+        ) (std.mem.Allocator.Error || error{ NotWriter, Overflow })!void {
+            const allocator = self.state.allocator
+                orelse return error.NotWriter;
+            const size = std.math.add(usize, capacity, 1)
+                catch return error.Overflow;
+            if (size <= self.state.buffer.len) return;
+            const allocation: []u8 = self.state.allocation orelse &.{};
+            const memory = try allocator.realloc(allocation, size);
+            if (self.state.allocation == null) memory[0] = 0;
+            self.state.allocation = memory;
+            self.state.buffer = memory;
+        }
+
+        /// transfer output storage and cursor; leave self safe to deinit
+        pub fn take(self: *Self) Self {
+            const owned = self.*;
+            self.* = .{};
+            return owned;
         }
 
         /// free owned output and clear state

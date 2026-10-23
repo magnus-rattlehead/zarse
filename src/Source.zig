@@ -1,4 +1,6 @@
 //! borrow input with optional seeking and size
+//! copies share one reader, give the pipeline exclusive access until cleanup
+//! keep reader, buffer and input in place, caller owns and closes input
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @This();
@@ -7,8 +9,7 @@ reader: *std.Io.Reader,
 seek_to: ?*const fn (*std.Io.Reader, u64) types.SeekError!void = null,
 get_size: ?*const fn (*std.Io.Reader) types.SizeError!u64 = null,
 
-/// borrow sequential input; keep reader, buffer, and input alive while
-/// decoding
+/// borrow sequential input; keep the reader, buffer and input alive while decoding
 pub fn fromReader(reader: *std.Io.Reader) Source {
     return .{ .reader = reader };
 }

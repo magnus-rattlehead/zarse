@@ -1,6 +1,6 @@
 //! layer iii lookup tables
 //! source: https://github.com/lieff/minimp3
-//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0).
+//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0)
 
 pub const g_scf_long: [8][23]u8 = .{
     .{

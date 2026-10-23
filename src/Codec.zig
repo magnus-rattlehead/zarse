@@ -8,13 +8,14 @@ const Codec = @This();
 
 pub const Error = types.Error;
 
-backend: Backend,
-scheme: types.InputScheme,
+backend: Backend = .empty,
+scheme: types.InputScheme = .packets,
 /// decoding history needed before a seek target, in frames
 preroll_frames: u64 = 0,
 
 /// owned adapters selected by enabled codec backends
 const Backend = union(enum) {
+    empty: void,
     pcm: if (features.pcm) *UnitAdapter(pcm) else void,
     mp3: if (features.mp3) *UnitAdapter(@import("codecs/mp3.zig")) else void,
     flac: if (features.flac) *UnitAdapter(@import("codecs/flac.zig")) else void,
@@ -61,6 +62,29 @@ pub fn init(
         },
         else => error.UnsupportedEncoding,
     };
+}
+
+/// borrow source, caller keeps ownership even on failure
+/// consume cached vorbis setup to avoid reparsing, including on init failure
+pub fn initSource(
+    allocator: std.mem.Allocator,
+    source: *@import("PacketSource.zig"),
+    options: types.Options,
+) Error!Codec {
+    if (features.vorbis and source.encoding == .vorbis) {
+        for (source.encoding.vorbis.headers) |bytes| {
+            if (bytes.len > options.bufferCapacity())
+                return error.LimitExceeded;
+            if (bytes.len == 0) return error.InvalidData;
+        }
+        var setup = source.takeVorbisSetup();
+        if (setup) |*owned_setup| {
+            defer owned_setup.deinit();
+            return @import("codecs/vorbis.zig")
+                .initTakeSetup(allocator, owned_setup, source.format, options);
+        }
+    }
+    return init(allocator, source.encoding, source.format, options);
 }
 
 /// validate channel-aligned output before decoding or modifying history
@@ -111,7 +135,7 @@ pub fn finish(self: *Codec) Error!void {
     }
 }
 
-/// clear output and history; keep configuration; failure requires recovery or reopening
+/// clear output and history; keep config; failure requires recovery or reopening
 pub fn reset(self: *Codec) Error!void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) == void)
@@ -121,6 +145,14 @@ pub fn reset(self: *Codec) Error!void {
     }
 }
 
+/// transfer codec ownership; leave self empty and safe to deinit
+/// finish external output borrows before transferring; internal views move with it
+pub fn take(self: *Codec) Codec {
+    const owned = self.*;
+    self.* = .{};
+    return owned;
+}
+
 /// free codec state and sample storage
 pub fn deinit(self: *Codec) void {
     switch (self.backend) {
@@ -128,7 +160,7 @@ pub fn deinit(self: *Codec) void {
                 backend.deinit();
             },
     }
-    self.* = undefined;
+    self.* = .{};
 }
 
 /// adapt a synchronous codec to packet submission and sample output
@@ -146,15 +178,65 @@ pub fn UnitAdapter(comptime Unit: type) type {
         pending: ?types.AudioBlock = null,
         draining: bool = false,
 
-        /// allocate adapter and bounded output, take unit ownership on success
+        /// copy a unit with no external resources
+        /// owning units require take() and initTake
         pub fn init(
             allocator: std.mem.Allocator,
             unit: Unit,
+            comptime backend: std.meta.Tag(Backend),
             scheme: types.InputScheme,
             max_frames_per_unit: u32,
             format: types.AudioFormat,
             options: types.Options,
-        ) Error!*Self {
+        ) Error!Codec {
+            if (@hasDecl(Unit, "take"))
+                @compileError(
+                    "Owning units require initTake with a mutable pointer",
+                );
+            return initOwned(
+                allocator,
+                unit,
+                backend,
+                scheme,
+                max_frames_per_unit,
+                format,
+                options,
+            );
+        }
+
+        /// empty source before validation; consume its resources on every outcome
+        pub fn initTake(
+            allocator: std.mem.Allocator,
+            source: *Unit,
+            comptime backend: std.meta.Tag(Backend),
+            scheme: types.InputScheme,
+            max_frames_per_unit: u32,
+            format: types.AudioFormat,
+            options: types.Options,
+        ) Error!Codec {
+            return initOwned(
+                allocator,
+                source.take(),
+                backend,
+                scheme,
+                max_frames_per_unit,
+                format,
+                options,
+            );
+        }
+
+        // only the public entry points decide whether unit is copied or consumed
+        fn initOwned(
+            allocator: std.mem.Allocator,
+            unit: Unit,
+            comptime backend: std.meta.Tag(Backend),
+            scheme: types.InputScheme,
+            max_frames_per_unit: u32,
+            format: types.AudioFormat,
+            options: types.Options,
+        ) Error!Codec {
+            var owned = unit;
+            errdefer owned.deinit();
             if (
                 max_frames_per_unit == 0
                     or format.channels == 0
@@ -169,7 +251,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
                 if (size > options.bufferCapacity()) return error.LimitExceeded;
                 units = options.bufferCapacity() / size;
             }
-            // reserve maximum pcm output for all buffered units
+            // reserve max pcm output for all buffered units
             const frames = std.math.mul(usize, units, max_frames_per_unit)
                 catch return error.LimitExceeded;
             const capacity = std.math.mul(usize, frames, format.channels)
@@ -179,21 +261,13 @@ pub fn UnitAdapter(comptime Unit: type) type {
             const output = try allocator.alloc(f32, capacity);
             self.* = .{
                 .allocator = allocator,
-                .unit = unit,
+                .unit = if (@hasDecl(Unit, "take")) owned.take() else owned,
                 .scheme = scheme,
                 .format = format,
                 .max_frames_per_unit = max_frames_per_unit,
                 .options = options,
                 .output = output,
             };
-            return self;
-        }
-
-        /// transfer adapter ownership; the backend tag must match its type
-        pub fn interface(
-            self: *Self,
-            comptime backend: std.meta.Tag(Backend),
-        ) Codec {
             return .{
                 .backend = @unionInit(Backend, @tagName(backend), self),
                 .scheme = self.scheme,
@@ -302,7 +376,7 @@ pub const Framer = struct {
     }
 
     /// borrow complete units until next call, null means end of input
-    /// the reader must stop before any trailing container metadata
+    /// reader must stop before any trailing container metadata
     pub fn next(self: *Framer, reader: *std.Io.Reader) Error!?[]const u8 {
         if (self.finished) return null;
         self.compact();
@@ -340,9 +414,24 @@ pub const Framer = struct {
         self.finished = false;
     }
 
+    /// transfer buffered input; leave self empty and safe to deinit
+    pub fn take(self: *Framer) Framer {
+        const owned = self.*;
+        self.* = .{
+            .allocator = self.allocator,
+            .scheme = self.scheme,
+            .finished = true,
+        };
+        return owned;
+    }
+
     /// free the input buffer
     pub fn deinit(self: *Framer) void {
         self.allocator.free(self.buffer);
-        self.* = undefined;
+        self.* = .{
+            .allocator = self.allocator,
+            .scheme = self.scheme,
+            .finished = true,
+        };
     }
 };

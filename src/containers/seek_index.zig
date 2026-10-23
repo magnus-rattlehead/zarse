@@ -45,8 +45,7 @@ pub fn Index(comptime Location: type) type {
             self.entries.appendAssumeCapacity(entry);
         }
 
-        /// find the last entry at or before target, or the first for earlier
-        /// targets
+        /// find the last entry at or before target; clamp earlier targets to the first
         /// return null for an empty index
         pub fn atOrBefore(self: *const Self, target: u64) ?Entry {
             const index = self.indexAtOrBefore(target) orelse return null;
@@ -70,6 +69,13 @@ pub fn Index(comptime Location: type) type {
             }
             // use preceding entry, clamp earlier targets to first entry
             return low -| 1;
+        }
+
+        /// transfer entries; leave self empty and safe to deinit
+        pub fn take(self: *Self) Self {
+            const owned = self.*;
+            self.* = .{};
+            return owned;
         }
 
         /// free all index entries and reset to empty

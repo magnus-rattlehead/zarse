@@ -1,11 +1,11 @@
-//! print decoded pcm samples, one frame per line
+//! decode audio to text frames or raw little endian f32 samples
 const std = @import("std");
 const zigaudioparser = @import("zigaudioparser");
 
 /// decode file to text frames or raw little endian f32 samples
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(allocator);
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     // optional raw mode writes little endian float samples
     const raw_pcm = args.len == 3 and std.mem.eql(u8, args[1], "--pcm-f32le");
     if (args.len != 2 and !raw_pcm) {

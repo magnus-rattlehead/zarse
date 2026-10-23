@@ -1,6 +1,6 @@
 //! read mp3 frames, metadata, trim bounds, and seek positions
 //! source: https://github.com/lieff/minimp3
-//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0).
+//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0)
 const std = @import("std");
 const types = @import("../../types.zig");
 const input_helpers = @import("../../input.zig");
@@ -235,7 +235,7 @@ fn bufferedFrame(self: *Self, ahead: usize) Error!?BufferedFrame {
         return err;
     };
     const header = current.header;
-    // the current reader keeps one fixed format and one free format frame size
+    // current reader keeps one fixed format and one free format frame size
     // bitrate, crc presence, padding, and stereo mode may vary between packets
     if (
         header.sampleRate() != self.metadata.sample_rate
@@ -281,7 +281,7 @@ pub fn canSeek(self: *const Self) bool {
 
 /// seek at or before untrimmed target with reservoir and synthesis history
 /// return decoded origin, caller resets codec and discards samples before target
-/// errors may advance input, requires configuration and a populated index
+/// errors may advance input, requires config and a populated index
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     try PacketSource.validateSeek(
         self.configured,
@@ -388,14 +388,14 @@ fn skipId3v2(self: *Self) Error!void {
 /// borrow buffered audio prefix after trimming recognized trailing metadata
 fn skipId3v1(bytes: []const u8) []const u8 {
     var end = bytes.len;
-    // id3v1 occupies 128 bytes; an optional TAG+ extension precedes it
+    // id3v1 occupies 128 bytes; an optional tag+ extension precedes it
     if (end >= 128 and std.mem.eql(u8, bytes[end - 128..][0..3], "TAG")) {
         end -= 128;
         if (end >= 227 and std.mem.eql(u8, bytes[end - 227..][0..4], "TAG+"))
             end -= 227;
     }
-    // ape footer, 8 byte signature, four version bytes, little endian four tag size bytes, ...
-    // the declared size includes the 32 byte footer and must fit this slice
+    // ape footer, 8 byte signature, four version bytes, little endian four tag size bytes, ..
+    // declared size includes the 32 byte footer and must fit this slice
     if (end >= 32 and std.mem.eql(u8, bytes[end - 32..][0..8], "APETAGEX")) {
         const size = std.mem.readInt(u32, bytes[end - 20..][0..4], .little);
         if (size >= 32 and size <= end) end -= size;
@@ -444,7 +444,7 @@ fn readVbrTag(bytes: []const u8, header: framing.Header) Error!?VbrTag {
     if (cursor < bytes.len and bytes[cursor] != 0) {
         if (bytes.len - cursor < 36) return error.InvalidData;
         // three bytes starting at 21 pack 12 bits each for delay and padding
-        // the middle byte holds delay low 4 bits and padding high 4 bits
+        // middle byte holds delay low 4 bits and padding high 4 bits
         const trim = bytes[cursor + 21..][0..3];
         // match minimp3 528 synthesis delay samples plus one alignment sample
         result.delay = (@as(u32, trim[0]) << 4 | trim[1] >> 4) + 529;
@@ -454,7 +454,7 @@ fn readVbrTag(bytes: []const u8, header: framing.Header) Error!?VbrTag {
     return result;
 }
 
-/// index complete audio frames before configuration, restore first frame on success
+/// index complete audio frames before config, restore first frame on success
 /// preserve declared playback bounds, errors may advance input
 fn buildIndex(self: *Self) Error!void {
     if (self.configured or self.frame != 0 or self.index.entries.items.len != 0)
@@ -488,7 +488,7 @@ fn buildIndex(self: *Self) Error!void {
     _ = try self.bufferedFrame(0) orelse return error.TruncatedData;
     // unknown end can now be announced at opening, declared limits stay authoritative
     if (self.presentation.end == null) _ = try self.finishStream(total);
-    self.index = index;
+    self.index = index.take();
 }
 
 /// ensure contiguous unread bytes, false if eof leaves too few

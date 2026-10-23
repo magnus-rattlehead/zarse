@@ -11,7 +11,7 @@ pub const Error = types.Error;
 pub const Config = types.OpusConfig;
 
 // use extra seek history to settle energy prediction beyond the 80 ms
-// minimum recommended by rfc 7845
+// min recommended by rfc 7845
 pub const preroll_frames: u64 = 24000; // 500 ms at 48 khz
 
 allocator: std.mem.Allocator,
@@ -41,13 +41,13 @@ pub fn init(
         .@"16",
         @intCast(state_bytes),
     );
-    errdefer allocator.free(storage);
     var unit = Self{
         .allocator = allocator,
         .storage = storage,
         .config = config,
         .format = format,
     };
+    defer unit.deinit();
     // map coded channels into the file output order
     try checkResult(
         libopus.opus_multistream_decoder_init(
@@ -59,10 +59,16 @@ pub fn init(
             &config.mapping,
         ),
     );
-    // 5760 samples per channel cover the maximum 120 ms packet
-    const adapter = try Codec.UnitAdapter(Self)
-        .init(allocator, unit, .packets, 5760, format, options);
-    return adapter.interface(.opus);
+    // 5760 samples per channel cover the max 120 ms packet
+    return Codec.UnitAdapter(Self)
+        .initTake(allocator, &unit, .opus, .packets, 5760, format, options);
+}
+
+/// transfer aligned decoder storage; leave self safe to deinit
+pub fn take(self: *Self) Self {
+    const owned = self.*;
+    self.storage = &.{};
+    return owned;
 }
 
 /// decode one packet with header gain; return the frame count
@@ -114,6 +120,7 @@ pub fn reset(self: *Self) Error!void {
 /// free decoder state; the adapter frees its sample buffer
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.storage);
+    self.storage = &.{};
 }
 
 /// borrow decoder state from aligned storage

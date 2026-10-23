@@ -51,7 +51,7 @@ pub const DecodingScheme = union(enum) {
 /// keep them unchanged until codec initialization copies their state
 pub const VorbisConfig = struct { headers: [3][]const u8 };
 
-/// Value-owned FLAC STREAMINFO; no borrowed metadata or codec storage.
+/// flac streaminfo stored by value
 pub const FlacConfig = @import("codecs/flac/StreamInfo.zig");
 
 /// configure opus mapping families 0 and 1 in opus and vorbis channel order
@@ -120,7 +120,7 @@ pub const Info = struct {
     channels: u16,
     /// wave speaker bits; null preserves unspecified source channel order
     channel_mask: ?u32 = null,
-    /// count frames, each with one sample per channel; null means unknown
+    /// total pcm frames, one sample per channel; null means unknown
     total_frames: ?u64,
     /// record whether the output sample rate has changed
     variable_sample_rate: bool = false,
@@ -181,7 +181,7 @@ pub const Error = DecoderError;
 
 /// bounds for working buffers, payloads and seek history
 pub const Options = struct {
-    /// limit packet and configuration bytes, excluding c codec allocations
+    /// limit packet and config bytes, excluding c codec allocations
     max_payload_bytes: usize = 64 * 1024 * 1024,
     /// limit seek index storage, including spare capacity
     max_index_bytes: usize = 64 * 1024 * 1024,

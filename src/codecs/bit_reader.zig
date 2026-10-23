@@ -17,10 +17,8 @@ pub const ReadUnaryError = error{
 }
     || Error;
 
-/// Read up to 32 bits from borrowed input without moving a cursor.
-/// Historical contract:
-/// A missing field returns null; each caller chooses its own failure policy.
-/// Short input now returns EndOfStream, and widths above 32 return InvalidBitCount.
+/// Peek up to 32 bits without moving the cursor.
+/// Short input returns EndOfStream; widths above 32 return InvalidBitCount.
 pub fn peek(
     comptime order: std.builtin.Endian,
     input: []const u8,
@@ -135,22 +133,13 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             self.count = 0;
         }
 
-        /// Comptime selects the optimal way to convert an integer of type `Unsigned`
-        /// to an integer of type `T`;
-        ///
-        /// * `T` - Target signed or unsigned integer type to convert to.
-        /// * `Unsigned` - An unsigned integer to convert from.
-        /// * `value` - The value to convert,
-        ///
-        /// Returns the value as type of `T`.
+        /// Convert buffered unsigned bits to T; signed results preserve the bit pattern.
         inline fn bitResult(
             comptime T: type,
             comptime Unsigned: type,
             value: Unsigned,
         ) T {
             if (comptime T == Unsigned) return value;
-            // This uses comptime branching, so this reduces down to only
-            // the necessary final branch at comptime.
             if (comptime @typeInfo(T).int.signedness == .signed) {
                 if (comptime @bitSizeOf(T) < 8) {
                     return @bitCast(
@@ -167,17 +156,8 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             }
         }
 
-        /// Reads the specified number of bits and returns them as an integer of the given type.
-        ///
-        /// * `T` - The desired integer type of the return value.
-        /// * `n` - The number of bits to read.
-        ///
-        /// Asserts that `n <= @bitSizeOf(T)`
-        ///
-        /// Note that for signed integers, the result is merely bit-cast from an
-        /// unsigned integer of the same width as `T`, which will likely not
-        /// handle the sign bit as expected. See `takeSignExtended` to properly
-        /// handle both widening and preserving the sign of the integer.
+        /// Read n bits as T; widths above @bitSizeOf(T) return InvalidBitCount.
+        /// Signed results preserve the bit pattern; use takeSignExtended to extend the sign.
         pub fn takeBits(self: anytype, comptime T: type, n: u16) Error!T {
             if (n > @bitSizeOf(T)) return error.InvalidBitCount;
             try self.ensureBits(n);
@@ -217,7 +197,6 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             const keep = 8 - bits_remaining;
 
             if (bits_remaining == 0) {
-                // Evenly divisible
                 return bitResult(T, Unsigned, result);
             }
 
@@ -244,12 +223,7 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             return bitResult(T, Unsigned, result);
         }
 
-        /// Convenience function for removing bits from the appropriate part
-        /// of the buffer based on the defined endian.
-        ///
-        /// * `n` - The number of bits to remove.
-        ///
-        /// Returns the value of the remove bits.
+        /// Consume n buffered bits in the configured bit order and return their value.
         fn removeBits(self: anytype, n: u4) u8 {
             if (n == 8) {
                 self.count = 0;
@@ -280,17 +254,8 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             return self.takeBits(T, @bitSizeOf(T));
         }
 
-        /// Reads the specified number of bits, and returns the value as a
-        /// sign-extended integer of the given type.
-        ///
-        /// * `T` - The signed-integer type to return.
-        /// * `n` - The number of bits to read.
-        ///
-        /// Asserts that `n > 0`
-        /// Asserts that `n <= @bitSizeOf(T)`
-        /// Asserts that `T` is a signed integer (comptime).
-        ///
-        /// Returns the signed-extended integer.
+        /// Read n bits and sign-extend to signed integer T.
+        /// Require signed T at comptime; zero or oversized widths return InvalidBitCount.
         pub fn takeSignExtended(
             self: anytype,
             comptime T: type,
@@ -308,8 +273,7 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
                 const Shift = std.math.Log2Int(T);
 
                 const value = try self.takeBits(Unsigned, n);
-                // Shift the value to the very top of the 32-bit boundary,
-                // then arithmetically right shift it back down to sign-extend.
+                // move the sign bit to the top of T, then shift arithmetically to extend it
                 const shift_amt: Shift = @intCast(@bitSizeOf(T) - n);
                 return @as(T, @bitCast(value << shift_amt)) >> shift_amt;
             } else {
@@ -326,13 +290,7 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
             }
         }
 
-        /// Reads bits one at a time until the given sentinel is reached,
-        /// and returns the number of non-sentinel bits read.
-        ///
-        /// * `T` - The desired integer type to return the count as.
-        /// * `sentinel` - The terminating value.
-        ///
-        /// Returns the number of leading bits that were not the sentinel.
+        /// Consume through the sentinel and return the preceding bit count as T.
         pub fn takeUnary(
             self: anytype,
             comptime T: type,
@@ -340,17 +298,39 @@ pub fn Methods(comptime endian: std.builtin.Endian) type {
         ) ReadUnaryError!T {
             var count: T = 0;
 
-            while (try self.takeBits(u1, 1) != sentinel) : (count += 1) {
-                if (count == std.math.maxInt(T)) {
+            while (true) {
+                if (self.count == 0) {
+                    try self.ensureBits(1);
+                    // Keep byte reads on the codec hook so CRCs stay in sync.
+                    self.buffer = try self.takeByteRaw();
+                    self.count = 8;
+                }
+                const candidates = (if (sentinel == 1)
+                    self.buffer
+                else
+                    ~self.buffer)
+                    & low_bit_mask[self.count];
+                const run: u4 = switch (endian) {
+                    .big => @clz(candidates) - (8 - self.count),
+                    .little => @min(@ctz(candidates), self.count),
+                };
+                const remaining = std.math.maxInt(T) - count;
+                const increment = std.math.cast(T, run);
+                if (increment == null or increment.? > remaining) {
+                    // overflow consumes the first non-sentinel bit beyond the count limit
+                    _ = removeBits(self, @as(u4, @intCast(remaining)) + 1);
+                    if (self.count == 0) self.buffer = 0;
                     return error.UnaryOverflow;
                 }
+                count += increment.?;
+                const terminated = run < self.count;
+                _ = removeBits(self, run + @as(u4, @intFromBool(terminated)));
+                if (self.count == 0) self.buffer = 0;
+                if (terminated) return count;
             }
-            return count;
         }
 
-        /// Discards the given number of bits and advanced the read position.
-        ///
-        /// * `n` - The number of bits to discard.
+        /// Discard n bits; short input leaves the cursor and checksums unchanged.
         pub fn discardBits(self: anytype, n: usize) Error!void {
             try self.ensureBits(n);
             // Consume through the bit reader so skipped payload also enters CRC-16.

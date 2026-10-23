@@ -47,21 +47,26 @@ pub fn init(
             or format.sample_rate != config.sample_rate
     )
         return error.InvalidData;
-    const unit: Self = .{
+    var unit: Self = .{
         .allocator = allocator,
         .frame = try Frame.init(allocator, config, true),
     };
-    errdefer unit.frame.deinit(allocator);
-    const adapter = try Codec.UnitAdapter(Self)
-        .init(
+    defer unit.deinit();
+    return Codec.UnitAdapter(Self)
+        .initTake(
             allocator,
-            unit,
+            &unit,
+            .flac,
             .packets,
             config.max_block_size,
             format,
             options,
         );
-    return adapter.interface(.flac);
+}
+
+/// Transfer frame storage; leave self safe to deinit.
+pub fn take(self: *Self) Self {
+    return .{ .allocator = self.allocator, .frame = self.frame.take() };
 }
 
 pub fn validateConfig(info: types.FlacConfig) types.Error!void {

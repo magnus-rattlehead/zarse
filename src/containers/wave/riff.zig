@@ -206,8 +206,7 @@ pub const FormatChunk = struct {
         } else if (
             container_bits != (@as(u32, fmt.bits_per_sample) + 7) / 8 * 8
         ) {
-            // wider pcm containers may hide mislabeled floats; reject
-            // ambiguity
+            // reject wider pcm storage that could conceal mislabeled floats
             return .unsupported;
         }
         const sample_type: types.PcmSampleType = if (tag == .ieee_float)
@@ -326,9 +325,8 @@ fn parseFormatPayload(
         )
             return error.InvalidData;
         if (fmt.audio_format == .extensible) {
-            // 22 bytes, valid bits 2 bytes, channel mask 4 bytes, guid 16 bytes
+            // extensible fields at byte 18: u16 valid bits, u32 channel mask, 16 byte guid
             if (size < 22) return error.InvalidData;
-            // fixed extensible fields occupy 22 bytes starting at byte 18
             try readRequired(source, bytes[18..40]);
             fmt.extension = .{
                 .size = size,
@@ -551,12 +549,6 @@ pub fn Reader(comptime streaming: bool) type {
                 .options = options,
             };
             errdefer self.deinit();
-            if (streaming) {
-                self.format_bytes = try allocator.alloc(
-                    u8,
-                    options.bufferCapacity(),
-                );
-            }
             var bytes: [40]u8 = undefined;
             bytes[0..4].* = prefix;
             // riff header includes form type, rf64 and bw64 require immediate ds64
@@ -591,8 +583,7 @@ pub fn Reader(comptime streaming: bool) type {
                     var ds_header: [8]u8 = undefined;
                     try self.read(&ds_header);
                     const size = std.mem.readInt(u32, ds_header[4..8], .little);
-                    // ds64 begins with three u64 sizes or counts and a u32 table
-                    // count
+                    // ds64 starts with three u64 sizes or counts, then a u32 table count
                     if (
                         !std.mem.eql(u8, ds_header[0..4], "ds64")
                             or size < 28
@@ -827,9 +818,11 @@ pub fn Reader(comptime streaming: bool) type {
                         return error.LimitExceeded;
                     }
                     if (streaming) {
-                        const bytes = self.format_bytes[
-                            0..@intCast(chunk.data.length)
-                        ];
+                        self.format_bytes = try self.allocator.alloc(
+                            u8,
+                            @intCast(chunk.data.length),
+                        );
+                        const bytes = self.format_bytes;
                         try self.read(bytes);
                         // reuse seekable format parser on retained streaming bytes
                         var reader = std.Io.Reader.fixed(bytes);
@@ -1088,7 +1081,7 @@ pub fn parse(source: Source) types.ParserError!types.ParsedAudio {
     return parseOptions(source, .{});
 }
 
-/// scan wav or wave64 metadata within the supplied configuration limits
+/// scan wav or wave64 metadata within the supplied config limits
 pub fn parseOptions(
     source: Source,
     options: types.Options,

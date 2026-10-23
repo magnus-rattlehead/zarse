@@ -77,20 +77,12 @@ const Scratch = struct {
     ist_pos: [2][39]u8 = @splat(@splat(0)),
 };
 
-/// Historical notes from the replaced codec-local reader:
-/// encoded bytes owned by caller, with current bit position
-/// borrow encoded bytes starting at bit zero
-/// read zero to 32 bits, starting from high bit of each byte
-/// still advance past missing bits and return zero so caller can reject frame
-// keep attempted position so side info checks can detect missing bits
-/// read ahead without moving position, missing bits are zero
-// reader keeps attempted position, reject side information that ran out of bytes
-/// The shared reader now returns errors without consuming a missing field.
+/// borrow encoded bytes with an msb first cursor; short fields return errors
+/// failed reads, peeks and skips leave the cursor unchanged
 const Bits = bit_reader.SliceReader(.big);
 
-/// Select a Huffman table entry using the available prefix. Short codewords can
-/// be decoded with fewer bits than the table width; read/advance still checks
-/// the selected codeword and its sign bits against the granule boundary.
+/// select huffman entry from available prefix, short codes need fewer bits
+/// read and advance still check codeword and sign bits against granule end
 fn huffmanIndex(reader: *const Bits, width: u6) bit_reader.Error!u32 {
     const count: u6 = @intCast(@min(width, reader.remaining()));
     const prefix = try reader.peek(count);
@@ -114,9 +106,8 @@ pub fn init(
     // field defaults clear saved bytes, samples and temporary buffers
     const unit = Self{ .format = format };
     // mpeg 1 produces at most 1152 pcm frames per channel per encoded packet
-    const adapter = try Codec.UnitAdapter(Self)
-        .init(allocator, unit, .packets, 1152, format, options);
-    return adapter.interface(.mp3);
+    return Codec.UnitAdapter(Self)
+        .init(allocator, unit, .mp3, .packets, 1152, format, options);
 }
 
 /// decode one complete mpeg 1 layer iii frame, return pcm frames per channel
@@ -532,7 +523,7 @@ fn decodeHuffman(
             ];
         }
         // minimp3 checks codeword end before reading its sign bits
-        // An incomplete final count1 group belongs to granule stuffing.
+        // an incomplete final count1 group belongs to granule stuffing
         const code_bits = leaf & 7;
         if (code_bits > reader.remaining()) break;
         const sign_bits = @popCount(leaf & 0xf0);

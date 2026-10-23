@@ -1,6 +1,6 @@
 //! parse mpeg audio headers and locate complete layer iii frames
 //! source: https://github.com/lieff/minimp3
-//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0).
+//! commit: ea99364f61c14656440e8d77e9c233ccf3124633 (cc0-1.0)
 const types = @import("../../types.zig");
 
 pub const Error = types.ParseError;
@@ -89,7 +89,7 @@ pub const Header = struct {
 
     /// report whether a two byte crc follows the header
     pub fn hasCrc(self: Header) bool {
-        // the low protection bit is inverted, zero means crc present, one means absent
+        // low protection bit is inverted, zero means crc present, one means absent
         return self.bytes[1] & 1 == 0;
     }
 
@@ -193,7 +193,7 @@ pub const Header = struct {
             (if (self.channels() == 1) @as(u8, 9) else 17);
     }
 
-    /// minimum encoded length for header, optional crc and side information
+    /// min encoded length for header, optional crc and side information
     pub fn minimumFrameBytes(self: Header) usize {
         return 4
             + @as(usize, self.sideInfoBytes())

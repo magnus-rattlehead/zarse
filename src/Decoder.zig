@@ -17,11 +17,12 @@ codec: Codec,
 metadata: types.Info,
 format: types.AudioFormat,
 presentation: types.Presentation,
-/// last frame retained for wave silence; allocated during initialization
-last_frame: []f32,
-/// unread codec output, copied into the caller buffer
+inline_frame: [8]f32 = @splat(0),
+last_frame: []f32 = &.{},
+history_channels: u16 = 0,
+/// unread borrowed codec output; drain before advancing/resetting codec
 pending: []const f32 = &.{},
-// keep new format output alive until caller accepts format change
+// borrows codec output; don't advance codec until the format change is accepted
 deferred_block: ?types.AudioBlock = null,
 silence: u64 = 0,
 // untrimmed pcm position, signed for origins before zero
@@ -48,11 +49,9 @@ pub fn initOptions(
     source: Source,
     options: Options,
 ) Error!Decoder {
-    return initPackets(
-        allocator,
-        try PacketSource.init(allocator, source, options),
-        options,
-    );
+    var packets = try PacketSource.init(allocator, source, options);
+    defer packets.deinit();
+    return initTakePackets(allocator, &packets, options);
 }
 
 /// open parsed wav and wave64 ranges from the same unchanged, seekable source
@@ -61,48 +60,45 @@ pub fn initParsed(
     source: Source,
     parsed: types.ParsedAudio,
 ) Error!Decoder {
-    return initPackets(
-        allocator,
-        try PacketSource.initParsed(allocator, source, parsed, .{}),
-        .{},
-    );
+    var packets = try PacketSource.initParsed(allocator, source, parsed, .{});
+    defer packets.deinit();
+    return initTakePackets(allocator, &packets, .{});
 }
 
 /// take ownership of the packet source, even on failure
+/// source is emptied before any fallible work and remains safe to deinit
 /// initialize the codec and reserve last frame history for the channel limit
-pub fn initPackets(
+pub fn initTakePackets(
     allocator: std.mem.Allocator,
-    source: PacketSource,
+    source: *PacketSource,
     options: Options,
 ) Error!Decoder {
-    var packets = source;
-    errdefer packets.deinit();
-    var codec = try Codec.init(
-        allocator,
-        packets.encoding,
-        packets.format,
-        options,
-    );
-    errdefer codec.deinit();
+    var packets = source.take();
+    defer packets.deinit();
+    var codec = try Codec.initSource(allocator, &packets, options);
+    defer codec.deinit();
     // container framing must match codec units before reading packets
     try packets.configure(codec.scheme);
     var result = Decoder{
         .allocator = allocator,
-        .packets = packets,
-        .codec = codec,
         .metadata = packets.info(),
         .format = packets.format,
         .presentation = packets.presentation,
         .decoded_frame = packets.decoded_origin,
         .last_frame = &.{},
+        .packets = packets.take(),
+        .codec = codec.take(),
     };
+    errdefer result.deinit();
     // reserve held silence frame for initial or allowed future channel count
-    result.last_frame = try allocator.alloc(
-        f32,
-        @max(result.format.channels, options.reserve_channels),
+    result.history_channels = @max(
+        result.format.channels,
+        options.reserve_channels,
     );
-    errdefer allocator.free(result.last_frame);
-    @memset(result.last_frame, 0);
+    if (result.history_channels > result.inline_frame.len) {
+        result.last_frame = try allocator.alloc(f32, result.history_channels);
+    }
+    @memset(result.history(), 0);
     // some sources discover output format while decoding initial packets
     while (result.format.channels == 0 or result.format.sample_rate == 0) {
         switch (try result.advance()) {
@@ -115,8 +111,8 @@ pub fn initPackets(
     if (result.presentation.end) |end| {
         if (end < result.presentation.start) return error.InvalidData;
         result.metadata.total_frames = end - result.presentation.start;
-    } else if (packets.info().total_frames) |count| {
-        const end = @as(i128, packets.decoded_origin) + count;
+    } else if (result.packets.info().total_frames) |count| {
+        const end = @as(i128, result.packets.decoded_origin) + count;
         if (end < result.presentation.start) return error.InvalidData;
         result.metadata.total_frames = std.math.cast(
             u64,
@@ -127,12 +123,40 @@ pub fn initPackets(
     return result;
 }
 
+/// transfer the pipeline, pending output and history; leave self safe to deinit
+/// borrowed input must still outlive the returned decoder
+pub fn take(self: *Decoder) Decoder {
+    const owned = self.*;
+    self.* = .{
+        .allocator = self.allocator,
+        .packets = .{},
+        .codec = .{},
+        .metadata = self.metadata,
+        .format = self.format,
+        .presentation = .{},
+        .finished = true,
+    };
+    return owned;
+}
+
 /// free buffers and codec state; leave input open
 pub fn deinit(self: *Decoder) void {
     self.codec.deinit();
     self.packets.deinit();
     self.allocator.free(self.last_frame);
-    self.* = undefined;
+    self.last_frame = &.{};
+    self.pending = &.{};
+    self.deferred_block = null;
+    self.silence = 0;
+    self.finished = true;
+    self.format_notice = false;
+}
+
+fn history(self: *Decoder) []f32 {
+    return if (self.last_frame.len != 0)
+        self.last_frame
+    else
+        self.inline_frame[0..self.history_channels];
 }
 
 /// return output format and known frame count after trimming
@@ -141,6 +165,7 @@ pub fn info(self: *const Decoder) types.Info {
 }
 
 /// return frames written; leave unused output untouched; zero means end
+/// borrow caller-owned output only during this call; retain no reference to it
 /// output must be nonempty and channel aligned; after a format change
 /// check metadata and retry; after an input error, discard output and
 /// seek successfully or reopen before reading
@@ -190,7 +215,7 @@ fn readFrames(self: *Decoder, out: []f32) Error!usize {
             for (0..frames) |frame_index| {
                 @memcpy(
                     out[written + frame_index * channels..][0..channels],
-                    self.last_frame[0..channels],
+                    self.history()[0..channels],
                 );
             }
             written += frames * channels;
@@ -365,8 +390,8 @@ fn applyFormat(self: *Decoder) Error!void {
         return error.InvalidData;
     }
     // format changes cannot allocate beyond reserved history
-    if (format.channels > self.last_frame.len) return error.LimitExceeded;
-    @memset(self.last_frame, 0);
+    if (format.channels > self.history_channels) return error.LimitExceeded;
+    @memset(self.history(), 0);
     if (
         self.format.sample_rate != 0
             and self.format.sample_rate != format.sample_rate
@@ -404,7 +429,7 @@ fn acceptBlock(self: *Decoder, block: types.AudioBlock) Error!void {
     // save full decoded tail before trimming, future silence repeats it
     if (frames != 0) {
         @memcpy(
-            self.last_frame[0..channels],
+            self.history()[0..channels],
             block.samples[block.samples.len - channels..],
         );
     }
@@ -460,7 +485,7 @@ fn seekInternal(self: *Decoder, target: u64) Error!void {
     self.finished = false;
     self.format_notice = false;
     self.pending_format = null;
-    @memset(self.last_frame, 0);
+    @memset(self.history(), 0);
     // discard preroll samples while preserving any block portion past target
     self.discard_until = target;
     defer self.discard_until = null;

@@ -313,8 +313,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
             var entry = self.index.atOrBefore(frame)
                 orelse return error.InvalidState;
             if (entry.location.segment == .silence) {
-                // replay prior data to restore held silence; leading silence
-                // starts at zero
+                // replay prior data to restore held silence; leading silence starts at zero
                 anchor = entry.location.previous_frame;
                 entry = self.index.atOrBefore(anchor)
                     orelse return error.InvalidState;
@@ -398,7 +397,7 @@ fn initIndex(self: *Self) Error!void {
             self.allocator,
             self.options.max_index_bytes,
             .{
-                // assigned during configuration, before seeking
+                // assigned during config, before seeking
                 .frame = 0,
                 .location = .{
                     .segment = segment,

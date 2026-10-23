@@ -26,11 +26,7 @@ pub fn build(builder: *std.Build) !void {
     const pcm = builder.option(bool, "pcm", "Enable PCM decoding") orelse true;
     const opus = builder.option(bool, "opus", "Enable the libopus backend")
         orelse true;
-    const vorbis = builder.option(
-        bool,
-        "vorbis",
-        "Enable the libvorbis backend",
-    )
+    const vorbis = builder.option(bool, "vorbis", "Enable the vorbis backend")
         orelse true;
     const options = builder.addOptions();
     options.addOption(bool, "wav", wav);
@@ -44,12 +40,6 @@ pub fn build(builder: *std.Build) !void {
     if (opus) {
         if (builder.lazyDependency("opus", .{})) |dep| {
             @import("build/opus.zig").add(builder, module, dep);
-        }
-    }
-    if (vorbis) {
-        if (builder.lazyDependency("vorbis", .{})) |dep| {
-            @import("build/vorbis.zig")
-                .add(module, dep, builder.path("src/codecs/vorbis_compat"));
         }
     }
     const example = builder.addExecutable(

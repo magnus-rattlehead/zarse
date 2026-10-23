@@ -43,23 +43,23 @@ pub fn initBuffers(self: *Self, capacity: usize) Error!void {
     if (self.stream != null or self.sync != null) return error.InvalidState;
     const packetCapacity = @min(capacity, self.limit);
     if (packetCapacity == 0) return error.LimitExceeded;
-    // retain one partial packet while inserting maximum size page
+    // retain one partial packet while inserting max size page
     const bodyCapacity = std.math.add(
         usize,
         packetCapacity,
         framing.maxBodyBytes,
     )
         catch return error.LimitExceeded;
-    self.stream = framing.Stream.init(self.allocator, 0)
+    self.stream = framing.Stream.initCapacity(
+        self.allocator,
+        0,
+        bodyCapacity,
+        packetCapacity / 255 + 257,
+    )
         catch |err| return mapError(err);
-    self.stream.?.reserve(bodyCapacity, packetCapacity / 255 + 257)
-        catch |err| return mapError(err);
-    // preallocated framing storage cannot grow during playback
-    self.stream.?.bounded = true;
     self.stream.?.maxPacketBytes = packetCapacity;
     self.sync = framing.Sync.init(self.allocator);
     self.sync.?.reserve(framing.maxPageBytes) catch |err| return mapError(err);
-    self.sync.?.bounded = true;
 }
 /// read exact bytes into synchronizer, map framing errors to shared errors
 fn required(self: *Self, size: usize) Error!void {
@@ -74,8 +74,8 @@ fn mapError(err: framing.Error) Error {
         else => |other| other,
     };
 }
-/// borrow packets completed on one page; reject missing stream ends
-/// final fragments, and chained or multiplexed streams
+/// borrow packets completed on one page; reject missing stream ends,
+/// final fragments, chained streams and multiplexed streams
 pub fn nextPage(self: *Self) Error!bool {
     if (self.finished) return false;
     self.count = 0;
@@ -125,7 +125,7 @@ pub fn nextPage(self: *Self) Error!bool {
     }
     self.sequence = page.sequence() +% 1;
     if (!self.resuming) {
-        // the continuation flag must match pending data outside a seek
+        // continuation flag must match pending data outside a seek
         if (
             self.allowMissingPacketStart
                 and !self.hasPartialPacket()
