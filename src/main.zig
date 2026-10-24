@@ -1,33 +1,27 @@
 //! decode audio to text frames or raw little endian f32 samples
 const std = @import("std");
-const zigaudioparser = @import("zigaudioparser");
+const zarse = @import("zarse");
 
-/// decode file to text frames or raw little endian f32 samples
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    // optional raw mode writes little endian float samples
     const raw_pcm = args.len == 3 and std.mem.eql(u8, args[1], "--pcm-f32le");
     if (args.len != 2 and !raw_pcm) {
-        std.debug.print(
-            "Usage: zigaudioparser-info [--pcm-f32le] <audio-file>\n",
-            .{},
-        );
+        std.debug.print("Usage: zarse-info [--pcm-f32le] <audio-file>\n", .{});
         std.process.exit(1);
     }
     const file = try std.Io.Dir.cwd()
         .openFile(init.io, args[if (raw_pcm) 2 else 1], .{});
     defer file.close(init.io);
-    // keep reader and its borrowed buffer alive through decoder cleanup
     var input_buffer: [64 * 1024]u8 = undefined;
     var reader = file.reader(init.io, &input_buffer);
-    var decoder = try zigaudioparser.Decoder.init(
+    var decoder = try zarse.Decoder.init(
         allocator,
-        zigaudioparser.Source.fromFile(&reader),
+        zarse.Source.fromFile(&reader),
+        .{ .buffer_bytes = 2 * 1024 * 1024 },
     );
     defer decoder.deinit();
     const info = decoder.info();
-    // room for 1024 interleaved pcm frames per read
     const samples = try allocator.alloc(f32, @as(usize, info.channels) * 1024);
     defer allocator.free(samples);
     var buffer: [64 * 1024]u8 = undefined;
@@ -46,7 +40,6 @@ pub fn main(init: std.process.Init) !void {
             frames += count;
             continue;
         }
-        // text output groups one sample per channel on each line
         for (0..count) |frame| {
             for (
                 samples[frame * info.channels..][0..info.channels],

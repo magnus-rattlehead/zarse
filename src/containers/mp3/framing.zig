@@ -62,7 +62,6 @@ pub const Header = struct {
 
     /// extract the two version bits, 11 means mpeg 1, 10 means mpeg 2, 00 means mpeg 2.5
     pub fn version(self: Header) Version {
-        // shift bits 4 to 3 down, then keep only those two bits with binary mask 11
         return switch ((self.bytes[1] >> 3) & 3) {
             3 => .mpeg1,
             2 => .mpeg2,
@@ -95,13 +94,11 @@ pub const Header = struct {
 
     /// bitrate index zero means frame size must be inferred from header spacing
     pub fn isFreeFormat(self: Header) bool {
-        // 0xf0 selects the high four bits, which hold the bitrate index
         return self.bytes[2] & 0xf0 == 0;
     }
 
     /// whether frame has one extra encoded byte, separate from trailing pcm trim
     pub fn hasPadding(self: Header) bool {
-        // binary mask 00000010 selects byte 2 padding bit
         return self.bytes[2] & 2 != 0;
     }
 
@@ -113,7 +110,6 @@ pub const Header = struct {
 
     /// identify joint stereo frames with intensity coding enabled
     pub fn isIntensityStereo(self: Header) bool {
-        // low extension bit enables intensity stereo, both flags can be set
         return self.mode() == .joint_stereo and self.modeExtension() & 1 != 0;
     }
 
@@ -135,23 +131,6 @@ pub const Header = struct {
         };
         // bits 3 to 2 select 44100, 48000, or 32000 before version scaling
         return g_hz[(self.bytes[2] >> 2) & 3] >> shift;
-    }
-
-    /// index nine sample rates in upstream order, mpeg 2.5 then 2 then 1
-    pub fn sampleRateIndex(self: Header) usize {
-        // each version has three rates, ordered by raw header index
-        const base: usize = switch (self.version()) {
-            .mpeg25 => 0,
-            .mpeg2 => 3,
-            .mpeg1 => 6,
-        };
-        return base + ((self.bytes[2] >> 2) & 3);
-    }
-
-    /// map nine sample rates to eight scalefactor band tables
-    pub fn bandTableIndex(self: Header) usize {
-        // 11025 and 12000 share first table, shift all later indices down one
-        return self.sampleRateIndex() -| 1;
     }
 
     /// pcm frames per channel per encoded frame, mpeg 1 has 1152, mpeg 2 or 2.5 have 576
@@ -178,7 +157,6 @@ pub const Header = struct {
     pub fn compatible(self: Header, other: Header) bool {
         // xor marks differing bits; 0xfe compares byte 1 except its crc bit
         if ((self.bytes[1] ^ other.bytes[1]) & 0xfe != 0) return false;
-        // 0x0c selects sample rate index bits
         if ((self.bytes[2] ^ other.bytes[2]) & 0x0c != 0) return false;
         // frame size discovery must use same method for both headers
         return self.isFreeFormat() == other.isFreeFormat();

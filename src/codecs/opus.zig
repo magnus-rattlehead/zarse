@@ -15,13 +15,12 @@ pub const Config = types.OpusConfig;
 pub const preroll_frames: u64 = 24000; // 500 ms at 48 khz
 
 allocator: std.mem.Allocator,
-/// owned decoder state; keep its address stable and aligned to 16 bytes
+/// keep the decoder address stable and aligned to 16 bytes
 storage: []align(16) u8,
 config: Config,
 format: types.AudioFormat,
 
 /// allocate a 48 khz decoder and output buffer in source channel order
-/// libopus uses stack scratch while decoding
 pub fn init(
     allocator: std.mem.Allocator,
     config: Config,
@@ -35,7 +34,6 @@ pub fn init(
         config.coupled_streams,
     );
     if (state_bytes <= 0) return error.InvalidData;
-    // own aligned storage so decoder address stays stable
     const storage = try allocator.alignedAlloc(
         u8,
         .@"16",
@@ -61,10 +59,10 @@ pub fn init(
     );
     // 5760 samples per channel cover the max 120 ms packet
     return Codec.UnitAdapter(Self)
-        .initTake(allocator, &unit, .opus, .packets, 5760, format, options);
+        .init(allocator, unit.take(), .opus, .packets, 5760, format, options);
 }
 
-/// transfer aligned decoder storage; leave self safe to deinit
+/// leave self empty and safe to deinit
 pub fn take(self: *Self) Self {
     const owned = self.*;
     self.storage = &.{};
@@ -73,9 +71,8 @@ pub fn take(self: *Self) Self {
 
 /// decode one packet with header gain; return the frame count
 /// output must hold 5760 samples per channel; the pipeline handles trimming
-/// output must be channel aligned; buffer errors preserve state; input failures require reset before reuse
+/// input failures require reset before reuse
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
-    try Codec.validateOutput(output, self.format.channels, 5760);
     if (bytes.len == 0) return error.InvalidData;
     // libopus packet length must fit signed c integer
     const packet_length = std.math.cast(c_int, bytes.len)
@@ -117,13 +114,11 @@ pub fn reset(self: *Self) Error!void {
     try checkResult(result);
 }
 
-/// free decoder state; the adapter frees its sample buffer
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.storage);
     self.storage = &.{};
 }
 
-/// borrow decoder state from aligned storage
 fn state(self: *Self) *libopus.OpusMSDecoder {
     return @ptrCast(self.storage.ptr);
 }

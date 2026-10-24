@@ -1,4 +1,4 @@
-# zigaudioparser
+# zarse (**z**ig **a**udio pa**rse**r)
 
 A small audio reading library for **Zig 0.16.0** codecs.
 

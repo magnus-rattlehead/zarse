@@ -1,8 +1,8 @@
 .{
-    .name = .zigaudioparser,
+    .name = .zarse,
     .version = "0.0.0",
     // changing the fingerprint affects package identity and trust.
-    .fingerprint = 0x90d077e819d685cc,
+    .fingerprint = 0x98659cc97eba463b,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .opus = .{

@@ -10,21 +10,19 @@ const Error = root.Error;
 pub const Transform = struct {
     /// block size in samples
     size: usize = 0,
-    /// owns a, b, c and window; never free or resize those views independently
     storage: []f32 = &.{},
-    /// twiddle factors of the even stages, borrowed from storage
+    /// even-stage twiddle factors
     a: []f32 = &.{},
-    /// twiddle factors of the odd stages, borrowed from storage
+    /// odd-stage twiddle factors
     b: []f32 = &.{},
-    /// twiddle factors of the final stage, borrowed from storage
+    /// final-stage twiddle factors
     c: []f32 = &.{},
-    /// separately owned bit reversed indices of the final stage
+    /// final-stage bit reversed indices
     bit_reverse: []u16 = &.{},
-    /// rising window slope of the half window, borrowed from storage
+    /// rising half-window slope
     window: []f32 = &.{},
 
     /// build transform and window tables for a vorbis block of 64..8192 samples
-    /// caller owns the returned tables and must call deinit
     pub fn init(allocator: std.mem.Allocator, size: usize) Error!Transform {
         if (
             size < 1 << root.min_block_size_log2
@@ -49,7 +47,6 @@ pub const Transform = struct {
         return self;
     }
 
-    /// release every owned allocation
     pub fn deinit(self: *Transform, allocator: std.mem.Allocator) void {
         allocator.free(self.storage);
         allocator.free(self.bit_reverse);

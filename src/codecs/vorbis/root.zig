@@ -19,7 +19,7 @@ pub const Error = error{
     || std.mem.Allocator.Error
     || @import("../bit_reader.zig").Error;
 
-/// least significant bit first reader over a borrowed packet
+/// lsb first packet reader
 pub const Reader = @import("../bit_reader.zig").SliceReader(.little);
 
 /// channel count accepted by the spec
@@ -52,7 +52,7 @@ pub const mdct = @import("mdct.zig");
 /// packet decoder and lapped synthesis
 pub const Decoder = @import("decoder.zig").Decoder;
 
-/// parsed setup tables without synthesis buffers; the caller owns the allocation
+/// setup tables without synthesis buffers
 pub const Setup = @import("setup.zig").Setup;
 /// validate a header's type and signature before accessing its payload
 pub const validateHeaderPrefix = @import("headers.zig").validatePrefix;

@@ -27,7 +27,6 @@ const VorbisSetup = if (features.vorbis)
 else
     void;
 
-/// owned container state selected during detection
 const Backend = union(enum) {
     empty: void,
     wave: if (features.wav) *Wave else void,
@@ -42,12 +41,10 @@ const containers = (if (features.wav) .{Wave} else .{})
 
 backend: Backend = .empty,
 encoding: types.DecodingScheme = .unsupported,
-format: types.AudioFormat = .{ .sample_rate = 0, .channels = 0 },
 presentation: types.Presentation = .{},
 /// first decoded sample position before trimming
-decoded_origin: i64 = 0,
+decoded_origin: u64 = 0,
 seekable: bool = false,
-max_payload_bytes: usize = 64 * 1024 * 1024,
 
 /// encoded packet or playback control event
 pub const Event = union(enum) {
@@ -60,11 +57,11 @@ pub const Event = union(enum) {
 };
 
 /// untrimmed pcm origin to use after resetting codec
-pub const SeekResult = struct { frame: i64 };
+pub const SeekResult = struct { frame: u64 };
 
-/// detect and open a container; allocate buffers and any seek index
+/// detect and open a container
 /// seekable input may be indexed; sequential input is parsed incrementally
-/// borrow exclusive reader access until deinit; never close the caller's input
+/// requires exclusive reader access until deinit; leaves input open
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -78,7 +75,7 @@ pub fn init(
     if (try source.reader.readSliceShort(&prefix) != prefix.len) {
         return error.UnsupportedFormat;
     }
-    // first matching probe owns full validation and remaining input
+    // the first matching probe validates the remaining input
     inline for (containers) |Container| {
         if (Container.probe(&prefix)) {
             return Container.init(allocator, source, prefix, options);
@@ -87,26 +84,15 @@ pub fn init(
     return error.UnsupportedFormat;
 }
 
-/// open an unchanged parsed wav layout; requires seeking and size
-pub fn initParsed(
-    allocator: std.mem.Allocator,
-    source: Source,
-    parsed: types.ParsedAudio,
-    options: types.Options,
-) Error!PacketSource {
-    if (!features.wav) return error.UnsupportedFormat;
-    return Wave.initParsed(allocator, source, parsed, options);
-}
-
-/// transfer container ownership; leave self empty and safe to deinit
-/// finish external packet/header borrows before transferring
+/// leave self empty and safe to deinit
+/// finish using returned packets before calling
 pub fn take(self: *PacketSource) PacketSource {
     const owned = self.*;
     self.* = .{};
     return owned;
 }
 
-/// transfer parsed setup ownership, leaving the container's slot empty
+/// remove and return the cached vorbis setup
 pub fn takeVorbisSetup(self: *PacketSource) ?VorbisSetup {
     if (!features.vorbis or !features.ogg) return null;
     if (self.backend != .ogg) return null;
@@ -117,35 +103,15 @@ pub fn takeVorbisSetup(self: *PacketSource) ?VorbisSetup {
     return headers.takeSetup();
 }
 
-/// set framing before requesting packets
-pub fn configure(self: *PacketSource, scheme: types.InputScheme) Error!void {
-    switch (self.backend) {
-        inline else => |container| if (@TypeOf(container) == void)
-                return error.InvalidState
-            else {
-                try container.configure(scheme);
-                self.seekable = container.canSeek();
-            },
-    }
-}
-
-/// borrow a packet until the next advancing source operation
+/// packet bytes remain valid until the next advancing source operation
 /// data and input failures require successful seeking or reopening before reuse
 pub fn next(self: *PacketSource) Error!Event {
-    const event = switch (self.backend) {
+    return switch (self.backend) {
         inline else => |container| if (@TypeOf(container) == void)
-                return error.InvalidState
+                error.InvalidState
             else
-                try container.next(),
+                container.next(),
     };
-    // enforce shared packet limits before codec sees borrowed bytes
-    if (event == .packet) {
-        if (event.packet.bytes.len == 0) return error.InvalidData;
-        if (event.packet.bytes.len > self.max_payload_bytes) {
-            return error.LimitExceeded;
-        }
-    }
-    return event;
 }
 
 /// return metadata with untrimmed frame counts
@@ -160,22 +126,20 @@ pub fn info(self: *const PacketSource) types.Info {
 
 /// reject predictable seek failures before changing input or parser state
 pub fn validateSeek(
-    configured: bool,
     seekable: bool,
     frame: u64,
     origin: u64,
     end: ?u64,
 ) Error!void {
-    if (!configured) return error.InvalidState;
     if (!seekable) return error.Unseekable;
-    if (frame < origin or frame > std.math.maxInt(i64)) return error.OutOfRange;
+    if (frame < origin) return error.OutOfRange;
     if (end) |limit| {
         if (frame > limit) return error.OutOfRange;
     }
 }
 
 /// seek at or before an untrimmed frame, preserving prior data needed for held silence
-/// config, capability, and known range rejections leave state unchanged
+/// capability and known range rejections leave state unchanged
 /// input failures may advance state and require successful seeking or reopening
 pub fn seek(self: *PacketSource, frame: u64) Error!SeekResult {
     return switch (self.backend) {
@@ -186,7 +150,7 @@ pub fn seek(self: *PacketSource, frame: u64) Error!SeekResult {
     };
 }
 
-/// free packet storage and parser state; leave input open
+/// leave input open
 pub fn deinit(self: *PacketSource) void {
     switch (self.backend) {
         inline else => |container| if (@TypeOf(container) != void) {

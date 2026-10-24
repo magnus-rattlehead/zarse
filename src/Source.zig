@@ -1,6 +1,6 @@
-//! borrow input with optional seeking and size
+//! input with optional seeking and size
 //! copies share one reader, give the pipeline exclusive access until cleanup
-//! keep reader, buffer and input in place, caller owns and closes input
+//! keep reader, buffer, and input in place until cleanup; close input separately
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @This();
@@ -9,12 +9,11 @@ reader: *std.Io.Reader,
 seek_to: ?*const fn (*std.Io.Reader, u64) types.SeekError!void = null,
 get_size: ?*const fn (*std.Io.Reader) types.SizeError!u64 = null,
 
-/// borrow sequential input; keep the reader, buffer and input alive while decoding
 pub fn fromReader(reader: *std.Io.Reader) Source {
     return .{ .reader = reader };
 }
 
-/// borrow a file reader; streaming files decode sequentially
+/// streaming files decode sequentially
 pub fn fromFile(reader: *std.Io.File.Reader) Source {
     return .{
         .reader = &reader.interface,
@@ -23,14 +22,13 @@ pub fn fromFile(reader: *std.Io.File.Reader) Source {
     };
 }
 
-/// borrow a fixed reader; keep its bytes unchanged
+/// keep the input bytes unchanged while decoding
 pub fn fromFixed(reader: *std.Io.Reader) Source {
     return .{ .reader = reader, .seek_to = fixedSeek, .get_size = fixedSize };
 }
 
 /// seek absolutely; unsupported seeks leave input unchanged
 pub fn seekTo(self: Source, offset: u64) types.SourceSeekError!void {
-    // missing callback leaves reader position unchanged
     const seek = self.seek_to orelse return error.Unseekable;
     try seek(self.reader, offset);
 }
@@ -48,14 +46,12 @@ pub fn getSize(self: Source) types.SizeError!?u64 {
 
 /// seek the file and update its buffered position
 fn fileSeek(reader: *std.Io.Reader, offset: u64) types.SeekError!void {
-    // recover file reader owning this interface
     const file: *std.Io.File.Reader = @fieldParentPtr("interface", reader);
     try file.seekTo(offset);
 }
 
 /// get file size, map streaming input to unseekable
 fn fileSize(reader: *std.Io.Reader) types.SizeError!u64 {
-    // recover file reader owning this interface
     const file: *std.Io.File.Reader = @fieldParentPtr("interface", reader);
     return file.getSize()
         catch |err| switch (err) {
@@ -70,7 +66,6 @@ fn fixedSeek(reader: *std.Io.Reader, offset: u64) types.SeekError!void {
     reader.seek = @intCast(offset);
 }
 
-/// return the full buffer length
 fn fixedSize(reader: *std.Io.Reader) types.SizeError!u64 {
     return reader.end;
 }

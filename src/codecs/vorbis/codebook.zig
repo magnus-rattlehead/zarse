@@ -22,8 +22,6 @@ pub const Codebook = struct {
     sorted_codewords: []u32 = &.{},
     /// entry index of every slot of the sorted tables
     sorted_values: []u32 = &.{},
-    /// slot of the sorted tables of every entry
-    entry_slots: []u32 = &.{},
     /// first slot of every codeword length, one past the last length
     length_start: [root.max_code_length + 2]u32 = @splat(0),
     /// longest codeword of the book
@@ -34,7 +32,6 @@ pub const Codebook = struct {
     multiplicands: []f32 = &.{},
 
     /// parse a book at its sync pattern and allocate decode tables
-    /// caller owns the returned tables and must call deinit
     pub fn read(allocator: std.mem.Allocator, reader: *Reader) Error!Codebook {
         var self: Codebook = .{};
         errdefer self.deinit(allocator);
@@ -106,11 +103,9 @@ pub const Codebook = struct {
         return self;
     }
 
-    /// release every owned allocation
     pub fn deinit(self: *Codebook, allocator: std.mem.Allocator) void {
         allocator.free(self.sorted_codewords);
         allocator.free(self.sorted_values);
-        allocator.free(self.entry_slots);
         allocator.free(self.multiplicands);
         self.* = .{};
     }
@@ -245,17 +240,13 @@ pub const Codebook = struct {
         errdefer allocator.free(sorted_values);
         const sorted_codewords = try allocator.alloc(u32, used);
         errdefer allocator.free(sorted_codewords);
-        const entry_slots = try allocator.alloc(u32, entries);
-        errdefer allocator.free(entry_slots);
         for (list, 0..) |item, index| {
             sorted_codewords[index] = item.codeword;
             sorted_values[index] = item.entry;
-            entry_slots[item.entry] = @intCast(index);
             self.max_length = @max(self.max_length, item.length);
         }
         self.sorted_values = sorted_values;
         self.sorted_codewords = sorted_codewords;
-        self.entry_slots = entry_slots;
         // first slot of every length bounds the search of a symbol
         @memset(&self.length_start, 0);
         var current: u32 = 0;
@@ -271,6 +262,10 @@ pub const Codebook = struct {
 
     /// decode one huffman symbol, the index of the entry
     pub fn decodeSymbol(self: *const Codebook, reader: *Reader) Error!u32 {
+        return self.sorted_values[try self.decodeSlot(reader)];
+    }
+
+    fn decodeSlot(self: *const Codebook, reader: *Reader) Error!usize {
         if (self.used_entries == 0) return error.InvalidData;
         var code: u32 = 0;
         var length: u8 = 1;
@@ -282,22 +277,21 @@ pub const Codebook = struct {
             if (start >= end) continue;
             const group = self.sorted_codewords[start..end];
             if (findCode(group, code)) |index| {
-                return self.sorted_values[start + index];
+                return start + index;
             }
         }
         return error.InvalidData;
     }
 
     /// decode a vector into output, which must hold dimensions values
-    /// scalar-only books return InvalidData; output borrows no table storage
+    /// scalar-only books return InvalidData
     pub fn decodeVector(
         self: *const Codebook,
         reader: *Reader,
         output: []f32,
     ) Error!void {
         if (self.lookup_type == 0) return error.InvalidData;
-        const entry = try self.decodeSymbol(reader);
-        const slot = self.entry_slots[entry];
+        const slot = try self.decodeSlot(reader);
         const start = slot * self.dimensions;
         @memcpy(
             output[0..self.dimensions],

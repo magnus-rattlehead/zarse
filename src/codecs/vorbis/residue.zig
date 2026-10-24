@@ -14,6 +14,7 @@ pub const unused = 0xffff;
 
 /// residue vector of one submap
 pub const Residue = struct {
+    kind: u2 = 0,
     /// first partition of the vector
     begin: u32 = 0,
     /// partition after the last one
@@ -24,14 +25,17 @@ pub const Residue = struct {
     classifications: u8 = 0,
     /// book that holds the partition classifications
     classbook: u16 = 0,
-    /// passes of every class
-    cascade: [64]u8 = @splat(0),
     /// books of every class and pass
     books: [64][8]u16 = @splat(@splat(unused)),
 
     /// read residue config, caller reads type first, fields shared by all types
-    pub fn read(reader: *Reader, codebook_count: usize) Error!Residue {
-        var self: Residue = .{};
+    pub fn read(
+        reader: *Reader,
+        codebook_count: usize,
+        kind: u2,
+    ) Error!Residue {
+        var self: Residue = .{ .kind = kind };
+        var cascade: [64]u8 = @splat(0);
         self.begin = try reader.read(24);
         self.end = try reader.read(24);
         self.partition_size = try reader.read(24) + 1;
@@ -45,13 +49,13 @@ pub const Residue = struct {
             const flag = try reader.read(1);
             var high: u32 = 0;
             if (flag == 1) high = try reader.read(5);
-            self.cascade[index] = @intCast(high * 8 + low);
+            cascade[index] = @intCast(high * 8 + low);
         }
         // books of every class follow in the order of the bitmap
         for (0..self.classifications) |index| {
             for (0..8) |pass| {
                 const bit = @as(u8, 1) << @intCast(pass);
-                if (self.cascade[index] & bit == 0) continue;
+                if (cascade[index] & bit == 0) continue;
                 const value = try reader.read(8);
                 if (value >= codebook_count) return error.InvalidData;
                 self.books[index][pass] = @intCast(value);
@@ -63,24 +67,21 @@ pub const Residue = struct {
     /// number of partition classes retained across all eight passes
     pub fn classificationCount(
         self: *const Residue,
-        residue_type: u2,
         bins: usize,
         channels: usize,
     ) usize {
-        const size = if (residue_type == 2) bins * channels else bins;
+        const size = if (self.kind == 2) bins * channels else bins;
         const begin = @min(self.begin, size);
         const end = @min(self.end, size);
         if (end <= begin) return 0;
         const partitions = (end - begin) / self.partition_size;
-        return partitions
-            * (if (residue_type == 2) @as(usize, 1) else channels);
+        return partitions * (if (self.kind == 2) @as(usize, 1) else channels);
     }
 
     /// decode one vector per submap channel, one value per spectral bin
     /// type 0 interleaves partition values, type 1 keeps order, type 2 interleaves channels
     pub fn decode(
         self: *const Residue,
-        residue_type: u2,
         reader: *Reader,
         codebooks: []const Codebook,
         vectors: [][]f32,
@@ -88,7 +89,7 @@ pub const Residue = struct {
         classifications: []u8,
         vector_scratch: []f32,
     ) Error!void {
-        const result = if (residue_type == 2)
+        const result = if (self.kind == 2)
             self.decodeResidue2(
                 reader,
                 codebooks,
@@ -99,7 +100,6 @@ pub const Residue = struct {
             )
         else
             self.decodeResidue01(
-                residue_type,
                 reader,
                 codebooks,
                 vectors,
@@ -119,7 +119,6 @@ pub const Residue = struct {
     /// marked channels consume no residue bits
     fn decodeResidue01(
         self: *const Residue,
-        residue_type: u2,
         reader: *Reader,
         codebooks: []const Codebook,
         vectors: [][]f32,
@@ -182,7 +181,6 @@ pub const Residue = struct {
                         const offset = limit_begin
                             + partition * self.partition_size;
                         try self.decodePartition(
-                            residue_type,
                             book,
                             reader,
                             vectors,
@@ -260,7 +258,6 @@ pub const Residue = struct {
                     const offset = limit_begin
                         + partition * self.partition_size;
                     try self.decodePartition(
-                        2,
                         book,
                         reader,
                         vectors,
@@ -278,7 +275,6 @@ pub const Residue = struct {
     /// type 2 scatters values across channels
     fn decodePartition(
         self: *const Residue,
-        residue_type: u2,
         book: *const Codebook,
         reader: *Reader,
         vectors: [][]f32,
@@ -291,7 +287,7 @@ pub const Residue = struct {
             return error.InvalidData;
         }
         const size = self.partition_size;
-        if (residue_type == 0) {
+        if (self.kind == 0) {
             // values of the partition are interleaved
             const step = size / dimensions;
             if (step == 0) return error.InvalidData;
@@ -314,7 +310,7 @@ pub const Residue = struct {
             try book.decodeVector(reader, vector_scratch[0..dimensions]);
             for (0..dimensions) |dimension| {
                 if (index >= size) break;
-                if (residue_type == 2) {
+                if (self.kind == 2) {
                     // type two variant scatters over the channels
                     const position = offset + index;
                     const target = position % vectors.len;

@@ -1,7 +1,6 @@
 //! audio metadata, sample formats, packets, options, and errors
 const std = @import("std");
 
-/// identify the audio container
 pub const Format = enum { wav, wave64, ogg, mp3, flac };
 
 /// sample storage width and numeric representation
@@ -15,7 +14,6 @@ pub const PcmSampleType = enum {
     float32,
     float64,
 
-    /// return storage bytes per sample
     pub fn byteSize(self: PcmSampleType) usize {
         return switch (self) {
             .unsigned8, .signed8 => 1,
@@ -35,23 +33,37 @@ pub const PcmFormat = struct {
     valid_bits: ?u16 = null,
 };
 
-/// identify the encoding; decoder support varies
 pub const DecodingScheme = union(enum) {
     pcm: PcmFormat,
     opus: OpusConfig,
-    vorbis: VorbisConfig,
+    vorbis,
     flac: FlacConfig,
     mp3,
     alaw,
     mulaw,
+    ima_adpcm: ImaAdpcmConfig,
+    ms_adpcm: MsAdpcmConfig,
     unsupported,
 };
 
-/// borrow identification, comment, and setup packets in stream order
-/// keep them unchanged until codec initialization copies their state
-pub const VorbisConfig = struct { headers: [3][]const u8 };
+pub const ImaAdpcmConfig = struct {
+    block_align: u16,
+    samples_per_block: u16,
+    byte_order: std.builtin.Endian = .little,
+};
 
-/// flac streaminfo stored by value
+/// microsoft adpcm predictor coefficients, in file order
+pub const AdpcmCoefficient = struct { first: i16, second: i16 };
+
+pub const MsAdpcmConfig = struct {
+    block_align: u16,
+    samples_per_block: u16,
+    byte_order: std.builtin.Endian = .little,
+    /// number of active coefficients; predictor selectors are u8
+    coefficient_count: u16,
+    coefficients: [256]AdpcmCoefficient = @splat(.{ .first = 0, .second = 0 }),
+};
+
 pub const FlacConfig = @import("codecs/flac/StreamInfo.zig");
 
 /// configure opus mapping families 0 and 1 in opus and vorbis channel order
@@ -83,7 +95,6 @@ pub const OpusConfig = struct {
                 or coded_channels > 255
         )
             return error.InvalidData;
-        // map value 255 requests silence
         for (self.mapping[0..format.channels]) |channel_index| {
             if (channel_index != 255 and channel_index >= coded_channels)
                 return error.InvalidData;
@@ -91,7 +102,6 @@ pub const OpusConfig = struct {
     }
 };
 
-/// locate an absolute byte range in the source
 pub const DataRange = struct {
     offset: u64 = 0,
     length: u64 = 0,
@@ -103,17 +113,21 @@ pub const DataRange = struct {
     }
 };
 
-pub const AudioData = @import("AudioData.zig");
-pub const Segment = AudioData.Segment;
+pub const Segment = union(enum) {
+    data: DataRange,
+    silence: u64,
 
-/// store parsed metadata and borrowed audio segments
-pub const ParsedAudio = struct {
-    info: Info,
-    scheme: DecodingScheme,
-    data: AudioData,
+    pub fn frameCount(self: Segment, alignment: u32) ValidationError!u64 {
+        return switch (self) {
+            .data => |range| if (range.length % alignment != 0)
+                error.InvalidData
+            else
+                range.length / alignment,
+            .silence => |frames| frames,
+        };
+    }
 };
 
-/// describe the audio stream
 pub const Info = struct {
     format: Format,
     sample_rate: u32,
@@ -122,23 +136,18 @@ pub const Info = struct {
     channel_mask: ?u32 = null,
     /// total pcm frames, one sample per channel; null means unknown
     total_frames: ?u64,
-    /// record whether the output sample rate has changed
-    variable_sample_rate: bool = false,
 
-    /// return duration, or null for unknown counts or a changed rate
+    /// return duration, or null for unknown counts
     /// sample rate must be nonzero
     pub fn durationSeconds(self: Info) ?f64 {
-        if (self.variable_sample_rate) return null;
         const frames = self.total_frames orelse return null;
         return @as(f64, @floatFromInt(frames))
             / @as(f64, @floatFromInt(self.sample_rate));
     }
 };
 
-/// report invalid metadata, sample formats, or byte ranges
 pub const ValidationError = error{ InvalidData };
 
-/// report container detection and parsing errors
 pub const ParseError = error{
     UnsupportedFormat,
     UnsupportedChunkLayout,
@@ -147,7 +156,6 @@ pub const ParseError = error{
     TruncatedData,
 };
 
-/// report decoding and decoder usage errors
 pub const DecodeError = error{
     UnsupportedEncoding,
     InvalidData,
@@ -156,22 +164,17 @@ pub const DecodeError = error{
     OutOfRange,
     LimitExceeded,
     InvalidState,
-    FormatChanged,
 };
 
 pub const ReadError = std.Io.Reader.Error;
 pub const SeekError = std.Io.File.Reader.SeekError;
-/// include errors from sources without seek support
 pub const SourceSeekError = SeekError || error{ Unseekable };
 pub const SizeError = std.Io.File.Reader.SizeError || error{ Unseekable };
 
-/// report source access errors
 pub const IoError = ReadError || SeekError || SizeError;
 
-/// include parsing and source access errors
 pub const ParserError = ParseError || IoError;
 
-/// include parsing, decoding, source access, and allocation errors
 pub const DecoderError = ParseError
     || DecodeError
     || IoError
@@ -179,18 +182,20 @@ pub const DecoderError = ParseError
 
 pub const Error = DecoderError;
 
-/// bounds for working buffers, payloads and seek history
+/// caller-selected working capacity and limits for payloads and seek history
+/// the library sizes codec state, scratch and sample storage internally
+/// buffer_bytes is not a total memory budget
 pub const Options = struct {
     /// limit packet and config bytes, excluding c codec allocations
     max_payload_bytes: usize = 64 * 1024 * 1024,
     /// limit seek index storage, including spare capacity
     max_index_bytes: usize = 64 * 1024 * 1024,
-    /// working storage for packet assembly, metadata and fixed units
-    /// capped by max_payload_bytes, reject inputs that cannot fit
-    buffer_bytes: usize = 64 * 1024,
-    /// reserve history for this channel count or the initial count, if larger
-    /// reject later format changes that exceed the reservation
-    reserve_channels: u16 = 8,
+    /// required capacity for encoded input assembly and retained format metadata
+    /// capped by max_payload_bytes; insufficient capacity returns LimitExceeded
+    /// choose before opening; flac frames, ogg packets and fixed pcm units must fit
+    /// mp3 also needs space for framing lookahead
+    /// separate from the source reader buffer and caller's decoded output buffer
+    buffer_bytes: usize,
 
     /// working storage size capped by payload limit
     pub fn bufferCapacity(self: Options) usize {
@@ -216,11 +221,6 @@ pub const InputScheme = union(enum) {
     }
 };
 
-/// seconds per timestamp tick, numerator divided by denominator
-pub const TimeBase = struct { numerator: u32, denominator: u32 };
-/// map media timestamps to frame positions for seeking
-pub const Timestamp = struct { value: i64, time_base: TimeBase };
-
 /// decoded frame interval, inclusive start and exclusive end, null end means unknown
 pub const Presentation = struct { start: u64 = 0, end: ?u64 = null };
 
@@ -230,41 +230,11 @@ pub const AudioFormat = struct {
     channels: u16,
     /// wave speaker bits; null preserves unspecified source channel order
     channel_mask: ?u32 = null,
-
-    /// compare sample rate and channel layout
-    pub fn eql(self: AudioFormat, other: AudioFormat) bool {
-        return self.sample_rate == other.sample_rate
-            and self.channels == other.channels
-            and self.channel_mask == other.channel_mask;
-    }
 };
 
-/// borrow encoded bytes; submission must consume or copy them before returning
+/// packet bytes remain valid until the next advancing source operation
 pub const Packet = struct {
     bytes: []const u8,
-    timestamp: ?Timestamp = null,
-    // duration in timestamp ticks, null when unknown
+    /// pcm frames per channel, null when unknown
     duration: ?u64 = null,
-};
-
-/// borrow interleaved f32 samples until the next codec operation
-pub const AudioBlock = struct {
-    samples: []const f32,
-    format: AudioFormat,
-    timestamp: ?Timestamp = null,
-
-    /// count frames; samples must be channel aligned
-    pub fn frameCount(self: AudioBlock) usize {
-        return self.samples.len / self.format.channels;
-    }
-};
-
-/// packet accepted or output must be received before retrying
-pub const Submit = enum { accepted, receive_output_first };
-/// decoded output, format change or next required pipeline action
-pub const Receive = union(enum) {
-    audio: AudioBlock,
-    need_input,
-    format_changed: AudioFormat,
-    finished,
 };

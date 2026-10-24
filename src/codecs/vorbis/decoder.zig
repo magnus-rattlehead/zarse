@@ -2,7 +2,6 @@
 //! ref: stb_vorbis.c vorbis_decode_packet_rest(), libvorbis block.c
 const std = @import("std");
 const root = @import("root.zig");
-const headers = @import("headers.zig");
 const mdct = @import("mdct.zig");
 const Setup = @import("setup.zig").Setup;
 const Error = root.Error;
@@ -109,7 +108,6 @@ const Scratch = struct {
     transform: []f32 = &.{},
 };
 
-/// owns setup tables, transform tables, synthesis history and scratch buffers
 pub const Decoder = struct {
     allocator: std.mem.Allocator,
     setup: Setup,
@@ -119,17 +117,6 @@ pub const Decoder = struct {
     channels: usize = 0,
     bins: usize = 0,
     block: usize = 0,
-
-    /// parse headers and allocate reusable buffers; the caller must call deinit
-    pub fn init(
-        allocator: std.mem.Allocator,
-        info: headers.Info,
-        setup: []const u8,
-    ) Error!Decoder {
-        var parsed = try Setup.init(allocator, info, setup);
-        defer parsed.deinit();
-        return initTakeSetup(allocator, &parsed);
-    }
 
     /// empty source immediately and consume its setup, including on failure
     pub fn initTakeSetup(
@@ -166,13 +153,10 @@ pub const Decoder = struct {
         self.scratch.transform = try allocator.alloc(f32, self.bins);
         // every partition's class is reused by the later residue passes
         var classes: usize = 0;
-        for (
-            self.setup.residues,
-            self.setup.residue_types,
-        ) |vector, residue_type| {
+        for (self.setup.residues) |vector| {
             classes = @max(
                 classes,
-                vector.classificationCount(residue_type, self.bins, rows),
+                vector.classificationCount(self.bins, rows),
             );
         }
         self.scratch.classifications = try allocator.alloc(u8, classes);
@@ -187,7 +171,7 @@ pub const Decoder = struct {
         return self;
     }
 
-    /// transfer tables, buffers and history; leave self safe to deinit
+    /// leave self empty and safe to deinit
     pub fn take(self: *Decoder) Decoder {
         const owned = self.*;
         self.* = .{
@@ -197,7 +181,6 @@ pub const Decoder = struct {
         return owned;
     }
 
-    /// release all tables and buffers with the allocator supplied to init
     pub fn deinit(self: *Decoder) void {
         self.setup.deinit();
         for (&self.transforms) |*transform| transform.deinit(self.allocator);
@@ -247,13 +230,24 @@ pub const Decoder = struct {
 
         // floor curves come first, they mark the channels with energy
         var nonzero: [root.max_channels]bool = @splat(false);
+        @memset(
+            self.scratch.spectrum,
+            0,
+        ); // residues add values here, so must start at 0
         for (0..self.channels) |channel| {
             const submap = map.mux[channel];
             const floor_index = map.submap_floor[submap];
             const curve = self.scratch.curves[channel * self.bins..][0..bins];
-            nonzero[channel] = try self.setup.floors[floor_index]
-                .decode(&reader, self.setup.codebooks, curve);
-            @memset(self.scratch.spectrum[channel * self.bins..][0..bins], 0);
+            nonzero[channel] = self.setup.floors[floor_index]
+                .decode(&reader, self.setup.codebooks, curve) catch |err| {
+                // packet ends (this is valid behaviour), mark all channels as silent and continue
+                // synthesis to preserve prev block overlap
+                if (err == error.EndOfStream) {
+                    @memset(&nonzero, false);
+                    break;
+                }
+                return err;
+            };
         }
         // coupling can make an empty channel carry energy
         for (0..map.coupling_steps) |step| {
@@ -281,7 +275,6 @@ pub const Decoder = struct {
             const index = map.submap_residue[submap];
             try self.setup.residues[index]
                 .decode(
-                    self.setup.residue_types[index],
                     &reader,
                     self.setup.codebooks,
                     vectors[0..count],

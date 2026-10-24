@@ -27,8 +27,6 @@ vorbis_headers: if (codec_options.vorbis) ?Vorbis.Headers else void = if (
     null
 else {
 },
-// owned header copies, keep stable while packet source and codec initialize
-header_bytes: [3][]const u8 = .{ &.{}, &.{}, &.{} },
 // previous vorbis transform size, zero before first overlap packet
 previous_block: u16 = 0,
 /// shift wire granules onto a nonnegative decode timeline
@@ -52,7 +50,6 @@ headers: u8 = 0,
 first_audio: bool = true,
 /// send final trim bounds before packets on the end page
 bounds_pending: bool = false,
-configured: bool = false,
 seekable: bool = false,
 
 /// recognize the prefix; validate pages when opening
@@ -60,7 +57,7 @@ pub fn probe(prefix: []const u8) bool {
     return std.mem.startsWith(u8, prefix, "OggS");
 }
 
-/// open borrowed input after its four byte prefix; keep input unchanged
+/// open after the four byte prefix; keep input unchanged
 /// allocate packet storage and any seek index; scan seekable input
 /// packets and tags must fit the configured buffer; errors may move input
 pub fn init(
@@ -115,32 +112,17 @@ pub fn init(
     }
     return .{
         .backend = .{ .ogg = self },
-        .encoding = if (self.is_vorbis) .{
-            .vorbis = .{ .headers = self.header_bytes },
-        } else .{ .opus = self.config },
-        .format = .{
-            .sample_rate = self.metadata.sample_rate,
-            .channels = self.metadata.channels,
-        },
+        .encoding = if (self.is_vorbis) .vorbis
+        else .{ .opus = self.config },
         .presentation = self.presentation,
-        .decoded_origin = std.math.cast(i64, self.origin)
-            orelse return error.InvalidData,
+        .decoded_origin = self.origin,
         .seekable = self.seekable,
-        .max_payload_bytes = options.max_payload_bytes,
     };
-}
-
-/// accept packet framing once; packet boundaries are already known
-pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
-    if (self.configured) return error.InvalidState;
-    if (scheme != .packets) return error.UnsupportedEncoding;
-    self.configured = true;
 }
 
 /// emit trim bounds, a packet, or end of input
 /// packet bytes expire on the next advancing source operation
 pub fn next(self: *Self) Error!PacketSource.Event {
-    if (!self.configured) return error.InvalidState;
     // vorbis overlap packet must reach codec before first audible packet
     if (self.prime_pending) {
         self.prime_pending = false;
@@ -157,7 +139,6 @@ pub fn next(self: *Self) Error!PacketSource.Event {
         return .{ .presentation = self.presentation };
     }
     const packet = self.pages.nextPacket().?;
-    // timestamp uses packet start, frame advances by untrimmed pcm duration
     const frame = self.frame;
     self.frame = std.math.add(u64, frame, self.durations[packet.index])
         catch return error.InvalidData;
@@ -165,14 +146,6 @@ pub fn next(self: *Self) Error!PacketSource.Event {
         .packet = .{
             .bytes = packet.bytes,
             .duration = self.durations[packet.index],
-            .timestamp = .{
-                .value = std.math.cast(i64, frame)
-                    orelse return error.InvalidData,
-                .time_base = .{
-                    .numerator = 1,
-                    .denominator = self.metadata.sample_rate,
-                },
-            },
         },
     };
 }
@@ -190,43 +163,29 @@ pub fn seek(self: *Self, target: u64) Error!PacketSource.SeekResult {
             std.math.add(u64, self.origin, total) catch return error.InvalidData
         else
             null;
-    try PacketSource.validateSeek(
-        self.configured,
-        self.canSeek(),
-        target,
-        self.origin,
-        end,
-    );
+    try PacketSource.validateSeek(self.seekable, target, self.origin, end);
     return self.seekIndexed(target);
 }
 
-/// report whether an index supports frame seeking
-pub fn canSeek(self: *const Self) bool {
-    return self.seekable;
-}
-
-/// restore an indexed anchor during opening or configured playback
+/// restore an indexed anchor during opening or playback
 fn seekIndexed(self: *Self, target: u64) Error!PacketSource.SeekResult {
     if (self.is_vorbis) return self.seekVorbis(target);
     const entry = self.index.atOrBefore(target)
         orelse return error.InvalidState;
-    const origin = std.math.cast(i64, entry.frame)
-        orelse return error.InvalidData;
+    const origin = entry.frame;
     try self.pages.seek(entry.location);
     self.frame = entry.frame;
     self.bounds_pending = false;
     return .{ .frame = origin };
 }
 
-/// free owned storage; leave borrowed input open
+/// leave input open
 pub fn deinit(self: *Self) void {
     if (codec_options.vorbis) {
         if (self.vorbis_headers) |*headers| {
             headers.deinit();
         }
     }
-    for (self.header_bytes) |bytes|
-        if (bytes.len != 0) self.allocator.free(bytes);
     if (self.initial_prime.len != 0) self.allocator.free(self.initial_prime);
     self.pages.deinit();
     self.index.deinit(self.allocator);
@@ -378,7 +337,7 @@ fn readFirstHeader(self: *Self, bytes: []const u8) Error!void {
     }
 }
 
-/// validate header and retain owned copy for codec initialization
+/// validate and retain the header for codec init
 fn addVorbisHeader(self: *Self, bytes: []const u8) Error!void {
     if (!codec_options.vorbis) return error.UnsupportedEncoding;
     if (self.headers == 1) {
@@ -393,8 +352,6 @@ fn addVorbisHeader(self: *Self, bytes: []const u8) Error!void {
             return error.InvalidData;
     }
     try self.vorbis_headers.?.add(bytes);
-    // page storage reused on next read, retain independent header bytes
-    self.header_bytes[self.headers] = try self.allocator.dupe(u8, bytes);
 }
 
 /// read headers then derive packet durations and final trim from page granule
@@ -616,7 +573,7 @@ fn seekVorbis(self: *Self, target: u64) Error!PacketSource.SeekResult {
     // last packet at or before target, preceding packet restores overlap
     const prime = selected -| 1;
     const anchor = entries[selected].frame;
-    const origin = std.math.cast(i64, anchor) orelse return error.InvalidData;
+    const origin = anchor;
     try self.pages.seek(entries[prime].location);
     self.frame = anchor;
     self.previous_block = 0;

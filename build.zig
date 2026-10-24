@@ -4,7 +4,7 @@ pub fn build(builder: *std.Build) !void {
     const target = builder.standardTargetOptions(.{});
     const optimize = builder.standardOptimizeOption(.{});
     const module = builder.addModule(
-        "zigaudioparser",
+        "zarse",
         .{
             .root_source_file = builder.path("src/root.zig"),
             .target = target,
@@ -24,6 +24,12 @@ pub fn build(builder: *std.Build) !void {
     )
         orelse true;
     const pcm = builder.option(bool, "pcm", "Enable PCM decoding") orelse true;
+    const wave_codecs = builder.option(
+        bool,
+        "wave_codecs",
+        "Enable WAVE codec scaffolding (A-law, mu-law, ADPCM)",
+    )
+        orelse true;
     const opus = builder.option(bool, "opus", "Enable the libopus backend")
         orelse true;
     const vorbis = builder.option(bool, "vorbis", "Enable the vorbis backend")
@@ -33,6 +39,7 @@ pub fn build(builder: *std.Build) !void {
     options.addOption(bool, "ogg", ogg);
     options.addOption(bool, "mp3", mp3);
     options.addOption(bool, "pcm", pcm);
+    options.addOption(bool, "wave_codecs", wave_codecs);
     options.addOption(bool, "flac", flac);
     options.addOption(bool, "opus", opus);
     options.addOption(bool, "vorbis", vorbis);
@@ -44,15 +51,13 @@ pub fn build(builder: *std.Build) !void {
     }
     const example = builder.addExecutable(
         .{
-            .name = "zigaudioparser-info",
+            .name = "zarse-info",
             .root_module = builder.createModule(
                 .{
                     .root_source_file = builder.path("src/main.zig"),
                     .target = target,
                     .optimize = optimize,
-                    .imports = &.{
-                        .{ .name = "zigaudioparser", .module = module },
-                    },
+                    .imports = &.{.{ .name = "zarse", .module = module }},
                 },
             ),
         },

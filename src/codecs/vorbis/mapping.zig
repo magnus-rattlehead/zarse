@@ -32,7 +32,6 @@ pub const Mapping = struct {
     submap_residue: []u8 = &.{},
 
     /// read a mapping and allocate its channel and submap tables
-    /// caller owns the returned tables and must call deinit
     pub fn read(
         allocator: std.mem.Allocator,
         reader: *Reader,
@@ -91,7 +90,6 @@ pub const Mapping = struct {
         return self;
     }
 
-    /// release every owned allocation
     pub fn deinit(self: *Mapping, allocator: std.mem.Allocator) void {
         allocator.free(self.coupling_magnitude);
         allocator.free(self.coupling_angle);
@@ -102,7 +100,7 @@ pub const Mapping = struct {
     }
 };
 
-/// read and validate modes; the caller owns the returned slice
+/// read and validate modes
 pub fn readModes(allocator: std.mem.Allocator, reader: *Reader) Error![]Mode {
     const count = try reader.read(6) + 1;
     const modes = try allocator.alloc(Mode, count);

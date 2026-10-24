@@ -31,6 +31,7 @@ pub const Floor = union(enum) {
     }
 
     /// decode linear gain per spectral bin, return false for a silent channel
+    /// EndOfStream lets packet decode silence all channels and preserve overlap
     pub fn decode(
         self: *const Floor,
         reader: *Reader,
@@ -111,10 +112,7 @@ pub const Floor0 = struct {
         var last: f32 = 0;
         var vector: [256]f32 = undefined;
         while (count < self.order) {
-            book.decodeVector(reader, vector[0..book.dimensions]) catch |err| {
-                if (err == error.EndOfStream) return false;
-                return err;
-            };
+            try book.decodeVector(reader, vector[0..book.dimensions]);
             for (vector[0..book.dimensions]) |value| {
                 if (count >= coefficients.len) break;
                 coefficients[count] = value + last;
@@ -316,21 +314,6 @@ pub const Floor1 = struct {
         codebooks: []const Codebook,
         curve: []f32,
     ) Error!bool {
-        return self.decodeCurve(reader, codebooks, curve)
-            catch |err| switch (err) {
-                // an end of packet leaves the channel without energy
-                error.EndOfStream => false,
-                else => err,
-            };
-    }
-
-    /// decode channel floor curve from partition amplitudes
-    fn decodeCurve(
-        self: *const Floor1,
-        reader: *Reader,
-        codebooks: []const Codebook,
-        curve: []f32,
-    ) Error!bool {
         const nonzero = try reader.read(1);
         if (nonzero == 0) return false;
         const range = range_table[self.multiplier - 1];
@@ -402,7 +385,7 @@ pub const Floor1 = struct {
                     if (high_room > low_room) {
                         final_y[index] = value - low_room + predicted;
                     } else {
-                        // Add headroom first so the intermediate cannot underflow.
+                        // add headroom first so the intermediate cannot underflow
                         final_y[index] = predicted + high_room - value - 1;
                     }
                 } else if (value & 1 == 1) {

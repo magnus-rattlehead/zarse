@@ -31,7 +31,6 @@ presentation: types.Presentation = .{},
 /// adjusted trailing pcm padding, retained even when xing omits a frame count
 end_padding: u32 = 0,
 index: SeekIndex = .{},
-configured: bool = false,
 eof: bool = false,
 // trailing tags stripped once after physical eof
 tail_checked: bool = false,
@@ -54,7 +53,7 @@ pub fn probe(prefix: []const u8) bool {
     return true;
 }
 
-/// open borrowed input after four byte prefix, retain first audio frame
+/// open after the four byte prefix and retain the first audio frame
 /// scan seekable input for frame positions, errors may advance input
 pub fn init(
     allocator: std.mem.Allocator,
@@ -86,7 +85,7 @@ pub fn init(
     self.free_format_bytes = first.free_format_bytes;
     const header = try framing.Header.parse(
         self.buffer[self.consumed..self.length],
-    ); // copy validated four byte header
+    );
     self.metadata.sample_rate = header.sampleRate();
     self.metadata.channels = header.channels();
 
@@ -133,28 +132,14 @@ pub fn init(
     return .{
         .backend = .{ .mp3 = self },
         .encoding = .mp3,
-        .format = .{
-            .sample_rate = self.metadata.sample_rate,
-            .channels = self.metadata.channels,
-        },
         .presentation = self.presentation,
         .seekable = seekable,
-        .max_payload_bytes = options.max_payload_bytes,
     };
 }
 
-/// accept packet framing once, one encoded frame per packet
-pub fn configure(self: *Self, scheme: types.InputScheme) Error!void {
-    if (self.configured) return error.InvalidState;
-    // encoded frame sizes can vary so fixed size schemes like .samples and .blocks are rejected
-    if (scheme != .packets) return error.UnsupportedEncoding;
-    self.configured = true;
-}
-
 /// emit frame with untrimmed pcm timing, announce trim bounds before affected packets
-/// packet bytes borrow input buffer until next advancing operation
+/// packet bytes remain valid until the next advancing operation
 pub fn next(self: *Self) Error!PacketSource.Event {
-    if (!self.configured) return error.InvalidState;
     // stop at the declared playable end
     // keep the crossing packet whole since the decoder trims its pcm
     if (self.presentation.end) |limit| {
@@ -162,8 +147,6 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     }
     const current = try self.bufferedFrame(0)
         orelse return self.finishStream(self.frame);
-    const start = std.math.cast(i64, self.frame)
-        orelse return error.InvalidData;
     const end = std.math.add(u64, self.frame, current.samples)
         catch return error.InvalidData;
 
@@ -183,7 +166,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 return self.finishStream(total);
             };
             ahead += following.length; // move lookahead to next encoded frame
-            samples += following.samples; // extend the known pcm duration
+            samples += following.samples;
         }
     }
 
@@ -191,20 +174,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     const bytes = self.buffer[self.consumed..][0..current.length];
     self.consumed += current.length;
     self.frame = end;
-    return .{
-        .packet = .{
-            .bytes = bytes,
-            .timestamp = .{
-                .value = start,
-                // one timestamp tick is one pcm frame, regardless of channel count
-                .time_base = .{
-                    .numerator = 1,
-                    .denominator = self.metadata.sample_rate,
-                },
-            },
-            .duration = current.samples,
-        },
-    };
+    return .{ .packet = .{ .bytes = bytes, .duration = current.samples } };
 }
 
 /// encoded byte length and pcm duration per channel
@@ -274,18 +244,12 @@ pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
-/// report whether an index supports frame seeking
-pub fn canSeek(self: *const Self) bool {
-    return self.seekable;
-}
-
 /// seek at or before untrimmed target with reservoir and synthesis history
 /// return decoded origin, caller resets codec and discards samples before target
-/// errors may advance input, requires config and a populated index
+/// errors may advance input
 pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     try PacketSource.validateSeek(
-        self.configured,
-        self.canSeek(),
+        self.seekable,
         frame,
         0,
         self.presentation.end orelse self.metadata.total_frames,
@@ -312,8 +276,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     }
 
     const anchor = entries[selected];
-    const origin = std.math.cast(i64, anchor.frame)
-        orelse return error.InvalidData;
+    const origin = anchor.frame;
     // discard inspection bytes and restart exactly at selected encoded header
     try self.seekInput(anchor.location);
     self.frame = anchor.frame;
@@ -331,7 +294,7 @@ fn seekInput(self: *Self, offset: u64) Error!void {
     self.tail_checked = false;
 }
 
-/// free input storage, the seek index, and reader state; leave input open
+/// leave input open
 pub fn deinit(self: *Self) void {
     const allocator = self.allocator;
     allocator.free(self.buffer);
@@ -385,7 +348,7 @@ fn skipId3v2(self: *Self) Error!void {
     }
 }
 
-/// borrow buffered audio prefix after trimming recognized trailing metadata
+/// return buffered audio without recognized trailing metadata
 fn skipId3v1(bytes: []const u8) []const u8 {
     var end = bytes.len;
     // id3v1 occupies 128 bytes; an optional tag+ extension precedes it
@@ -394,7 +357,7 @@ fn skipId3v1(bytes: []const u8) []const u8 {
         if (end >= 227 and std.mem.eql(u8, bytes[end - 227..][0..4], "TAG+"))
             end -= 227;
     }
-    // ape footer, 8 byte signature, four version bytes, little endian four tag size bytes, ..
+    // ape footer, 8 byte signature, four version bytes, little endian four tag size bytes,
     // declared size includes the 32 byte footer and must fit this slice
     if (end >= 32 and std.mem.eql(u8, bytes[end - 32..][0..8], "APETAGEX")) {
         const size = std.mem.readInt(u32, bytes[end - 20..][0..4], .little);
@@ -454,16 +417,15 @@ fn readVbrTag(bytes: []const u8, header: framing.Header) Error!?VbrTag {
     return result;
 }
 
-/// index complete audio frames before config, restore first frame on success
+/// index complete audio frames, restore first frame on success
 /// preserve declared playback bounds, errors may advance input
 fn buildIndex(self: *Self) Error!void {
-    if (self.configured or self.frame != 0 or self.index.entries.items.len != 0)
+    if (self.frame != 0 or self.index.entries.items.len != 0)
         return error.InvalidState;
     // init already skipped leading tags and any xing or info metadata frame
     const start = std.math.add(u64, self.offset, self.consumed)
         catch return error.InvalidData;
     var index: SeekIndex = .{};
-    // keep partial index local so failed scans release all allocated entries
     errdefer index.deinit(self.allocator);
     var total: u64 = 0;
     // scan all physical audio frames
@@ -492,7 +454,7 @@ fn buildIndex(self: *Self) Error!void {
 }
 
 /// ensure contiguous unread bytes, false if eof leaves too few
-/// may move buffer and invalidate borrowed slices, oversized requests return error
+/// invalidates buffer slices; oversized requests return an error
 fn ensureBytes(self: *Self, count: usize) Error!bool {
     // lookahead must retain all bytes from unread cursor through requested end
     if (count > self.buffer.len) return error.LimitExceeded;

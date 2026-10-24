@@ -1,4 +1,4 @@
-//! borrow vendor and comment fields for vorbis, opus, and flac
+//! read vendor and comment fields for vorbis, opus, and flac
 //! keep input unchanged; callers handle signatures, framing, and padding
 const std = @import("std");
 const Error = @import("../types.zig").ValidationError;
@@ -26,7 +26,7 @@ pub fn init(bytes: []const u8) Error!Self {
     };
 }
 
-/// borrow the next comment, or null at the end; empty comments remain valid
+/// return the next comment, or null at the end; empty comments are valid
 /// validate lengths here; callers interpret text and field names
 pub fn next(self: *Self) Error!?[]const u8 {
     if (self.comments_left == 0) return null;
@@ -35,11 +35,9 @@ pub fn next(self: *Self) Error!?[]const u8 {
     return comment;
 }
 
-/// borrow length prefixed field and advance remaining slice
 fn readField(remaining: *[]const u8) Error![]const u8 {
     if (remaining.len < 4) return error.InvalidData;
     const length = std.mem.readInt(u32, remaining.*[0..4], .little);
-    // check payload fits before slicing, empty field allowed
     if (length > remaining.len - 4) return error.InvalidData;
     const field = remaining.*[4..][0..length];
     remaining.* = remaining.*[4 + @as(usize, length)..];

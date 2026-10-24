@@ -1,44 +1,7 @@
-//! public audio types, decoding pipeline and container parsers
+//! audio decoding and stream properties
 pub const features = @import("build_options");
-pub const types = @import("types.zig");
-pub const parse = if (features.wav) wave.parse else void;
-pub const parseOptions = if (features.wav) wave.parseOptions else void;
-pub const wave64 = if (features.wav) wave.wave64 else void;
-pub const wav = if (features.wav) wave.wav else void;
 pub const Decoder = @import("Decoder.zig");
-pub const DataRange = types.DataRange;
-pub const AudioData = types.AudioData;
-pub const Segment = types.Segment;
-pub const Info = types.Info;
-pub const Format = types.Format;
-pub const DecodeError = types.DecodeError;
-pub const ParseError = types.ParseError;
-pub const ReadError = types.ReadError;
-pub const SeekError = types.SeekError;
-pub const SizeError = types.SizeError;
-pub const IoError = types.IoError;
-pub const ValidationError = types.ValidationError;
-pub const SourceSeekError = types.SourceSeekError;
-pub const ParserError = types.ParserError;
-pub const DecoderError = types.DecoderError;
-pub const ParsedAudio = types.ParsedAudio;
-pub const DecodingScheme = types.DecodingScheme;
-pub const PcmFormat = types.PcmFormat;
-pub const PcmSampleType = types.PcmSampleType;
 pub const Source = @import("Source.zig");
-pub const PacketSource = @import("PacketSource.zig");
-pub const Codec = @import("Codec.zig");
-pub const Framer = Codec.Framer;
-pub const OpusConfig = types.OpusConfig;
-pub const VorbisConfig = types.VorbisConfig;
-pub const FlacConfig = types.FlacConfig;
-pub const flac = if (features.flac)
-    @import("containers/flac/root.zig")
-else
-    void;
-pub const wave = if (features.wav)
-    @import("containers/wave/root.zig")
-else
-    void;
-pub const ogg = if (features.ogg) @import("containers/ogg/root.zig") else void;
-pub const mp3 = if (features.mp3) @import("containers/mp3/root.zig") else void;
+pub const Info = @import("types.zig").Info;
+pub const Format = @import("types.zig").Format;
+pub const DecoderError = Decoder.Error;

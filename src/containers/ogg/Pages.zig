@@ -1,4 +1,4 @@
-//! read one audio stream; shared framing assembles packets
+//! validate ogg pages and assemble packets for one audio stream
 const std = @import("std");
 const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
@@ -7,9 +7,8 @@ const framing = @import("framing.zig");
 const Self = @This();
 
 pub const Location = framing.Location;
-/// borrowed assembled packet and location of its first segment
 pub const Packet = struct { bytes: []const u8, location: Location };
-/// borrowed packet with index into current page metadata
+/// packet and its index into the current page metadata
 pub const PacketView = struct {
     bytes: []const u8,
     location: Location,
@@ -18,8 +17,12 @@ pub const PacketView = struct {
 allocator: std.mem.Allocator,
 input: Input,
 limit: usize,
-stream: ?framing.Stream = null,
-sync: ?framing.Sync = null,
+assembly: []u8 = &.{},
+length: usize = 0,
+partial_offset: usize = 0,
+partial_location: ?Location = null,
+packet_capacity: usize = 0,
+page_buffer: []u8 = &.{},
 // logical stream identifier fixed by first page
 serial: ?u32 = null,
 sequence: u32 = 0,
@@ -37,44 +40,21 @@ packetCursor: usize = 0,
 granule: i64 = -1,
 flags: u8 = 0,
 
-/// reserve a partial packet plus one page and its laces
+/// reserve a partial packet plus one page
 /// cleanup is required even on failure
 pub fn initBuffers(self: *Self, capacity: usize) Error!void {
-    if (self.stream != null or self.sync != null) return error.InvalidState;
-    const packetCapacity = @min(capacity, self.limit);
-    if (packetCapacity == 0) return error.LimitExceeded;
-    // retain one partial packet while inserting max size page
-    const bodyCapacity = std.math.add(
+    self.packet_capacity = @min(capacity, self.limit);
+    if (self.packet_capacity == 0) return error.LimitExceeded;
+    const capacity_bytes = std.math.add(
         usize,
-        packetCapacity,
+        self.packet_capacity,
         framing.maxBodyBytes,
     )
         catch return error.LimitExceeded;
-    self.stream = framing.Stream.initCapacity(
-        self.allocator,
-        0,
-        bodyCapacity,
-        packetCapacity / 255 + 257,
-    )
-        catch |err| return mapError(err);
-    self.stream.?.maxPacketBytes = packetCapacity;
-    self.sync = framing.Sync.init(self.allocator);
-    self.sync.?.reserve(framing.maxPageBytes) catch |err| return mapError(err);
+    self.assembly = try self.allocator.alloc(u8, capacity_bytes);
+    self.page_buffer = try self.allocator.alloc(u8, framing.maxPageBytes);
 }
-/// read exact bytes into synchronizer, map framing errors to shared errors
-fn required(self: *Self, size: usize) Error!void {
-    const buffer = self.sync.?.buffer(size) catch |err| return mapError(err);
-    try self.input.required(buffer[0..size]);
-    self.sync.?.commit(size) catch |err| return mapError(err);
-}
-/// convert framing overflow into configured resource limit error
-fn mapError(err: framing.Error) Error {
-    return switch (err) {
-        error.Overflow => error.LimitExceeded,
-        else => |other| other,
-    };
-}
-/// borrow packets completed on one page; reject missing stream ends,
+/// read packets completed on one page; reject missing stream ends,
 /// final fragments, chained streams and multiplexed streams
 pub fn nextPage(self: *Self) Error!bool {
     if (self.finished) return false;
@@ -88,28 +68,38 @@ pub fn nextPage(self: *Self) Error!bool {
         self.finished = true;
         return false;
     }
+    // keep only the unfinished packet from the previous page
+    const remaining = self.length - self.partial_offset;
+    std.mem.copyForwards(
+        u8,
+        self.assembly[0..remaining],
+        self.assembly[self.partial_offset..self.length],
+    );
+    self.length = remaining;
+    self.partial_offset = 0;
     const offset = self.input.position;
-    self.sync.?.reset();
     // read the fixed header, lace table, then body
-    try self.required(27);
-    const header = self.sync.?.data.items[0..27];
+    const header = self.page_buffer[0..27];
+    try self.input.required(header);
     if (
         !std.mem.eql(u8, header[0..4], "OggS")
             or header[4] != 0
             or header[5] & ~@as(u8, 7) != 0
     )
         return error.InvalidData;
-    const segmentCount = header[26];
-    try self.required(segmentCount);
+    const headerLength = 27 + @as(usize, header[26]);
+    const segments = self.page_buffer[27..headerLength];
+    try self.input.required(segments);
     var length: usize = 0;
     // sum lace lengths, including fragments across pages
-    for (self.sync.?.data.items[27..]) |segment| length += segment;
-    try self.required(length);
-    // verify the page checksum before accepting it
-    const page = switch (self.sync.?.pageSeek()) {
-        .page => |page| page,
-        else => return error.InvalidData,
+    for (segments) |segment| length += segment;
+    const body = self.page_buffer[headerLength..][0..length];
+    try self.input.required(body);
+    const page = framing.Page{
+        .header = self.page_buffer[0..headerLength],
+        .body = body,
     };
+    if (!page.verifyChecksum()) return error.InvalidData;
     self.flags = page.flags();
     self.granule = page.granulePosition();
     // reject multiplexing or restarting stream, page sequence wraps naturally
@@ -121,7 +111,6 @@ pub fn nextPage(self: *Self) Error!bool {
         if (!page.isBeginning() or page.isContinued() or page.sequence() != 0)
             return error.InvalidData;
         self.serial = page.serial();
-        self.stream.?.serial = page.serial();
     }
     self.sequence = page.sequence() +% 1;
     if (!self.resuming) {
@@ -140,36 +129,36 @@ pub fn nextPage(self: *Self) Error!bool {
     }
     self.allowMissingPacketStart = false;
     if (self.skipSegments > page.segments().len) return error.InvalidData;
-    if (self.discardingPacket) {
-        for (page.segments()) |segment| {
-            if (segment < 255) {
-                self.discardingPacket = false;
-                break;
-            }
+    var cursor: usize = 0;
+    for (segments[0..self.skipSegments]) |size| cursor += size;
+    for (segments[self.skipSegments..], self.skipSegments..) |size, index| {
+        const fragment = body[cursor..][0..size];
+        cursor += size;
+        if (self.discardingPacket) {
+            if (size < 255) self.discardingPacket = false;
+            continue;
+        }
+        if (self.partial_location == null) {
+            self.partial_location = .{
+                .offset = offset,
+                .sequence = page.sequence(),
+                .segment = @intCast(index),
+            };
+        }
+        if (self.length - self.partial_offset + size > self.packet_capacity)
+            return error.LimitExceeded;
+        @memcpy(self.assembly[self.length..][0..size], fragment);
+        self.length += size;
+        if (size < 255) {
+            self.packets[self.count] = .{
+                .bytes = self.assembly[self.partial_offset..self.length],
+                .location = self.partial_location.?,
+            };
+            self.count += 1;
+            self.partial_offset = self.length;
+            self.partial_location = null;
         }
     }
-    self.stream.?.pageIn(
-        page,
-        .{
-            .offset = offset,
-            .startSegment = self.skipSegments,
-            .resuming = self.resuming,
-        },
-    )
-        catch |err| return mapError(err);
-    // collect completed packets while leaving trailing fragment queued
-    while (true)
-        switch (self.stream.?.packetOut()) {
-            .needInput => break,
-            .hole => return error.InvalidData,
-            .packet => |packet| {
-                self.packets[self.count] = .{
-                    .bytes = packet.bytes,
-                    .location = packet.location orelse return error.InvalidData,
-                };
-                self.count += 1;
-            },
-        };
     self.skipSegments = 0;
     self.resuming = false;
     self.ended = page.isEnd();
@@ -186,13 +175,13 @@ pub fn nextPage(self: *Self) Error!bool {
 }
 /// whether unfinished packet bytes need a later page
 pub fn hasPartialPacket(self: *const Self) bool {
-    return if (self.stream) |*stream| stream.hasPartialPacket() else false;
+    return self.partial_location != null;
 }
 /// whether current page has unread completed packets
 pub fn hasPacket(self: *const Self) bool {
     return self.packetCursor < self.count;
 }
-/// borrow next completed packet until next page load or seek
+/// packet bytes remain valid until the next page load or seek
 pub fn nextPacket(self: *Self) ?PacketView {
     if (!self.hasPacket()) return null;
     const index = self.packetCursor;
@@ -203,16 +192,15 @@ pub fn nextPacket(self: *Self) ?PacketView {
         .index = index,
     };
 }
-/// borrow packet bytes by current page index
 pub fn bytes(self: *const Self, index: usize) []const u8 {
     return self.packets[index].bytes;
 }
 /// reset assembly and resume at indexed packet boundary
 pub fn seek(self: *Self, location: Location) Error!void {
     try self.input.seek(location.offset);
-    self.stream.?.reset();
-    self.stream.?.nextSequence = location.sequence;
-    self.sync.?.reset();
+    self.length = 0;
+    self.partial_offset = 0;
+    self.partial_location = null;
     self.sequence = location.sequence;
     // resume at the packet first lace, skipping earlier segments
     self.skipSegments = location.segment;
@@ -224,12 +212,12 @@ pub fn seek(self: *Self, location: Location) Error!void {
     self.count = 0;
     self.packetCursor = 0;
 }
-/// free packet assembly and synchronizer storage, leave source open
+/// leave input open
 pub fn deinit(self: *Self) void {
-    if (self.stream) |*stream| stream.deinit();
-    if (self.sync) |*sync| sync.deinit();
-    self.stream = null;
-    self.sync = null;
+    self.allocator.free(self.assembly);
+    self.allocator.free(self.page_buffer);
+    self.assembly = &.{};
+    self.page_buffer = &.{};
 }
 
 /// replay the detection prefix and track input offsets

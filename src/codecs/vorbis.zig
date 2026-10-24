@@ -7,39 +7,11 @@ const vorbis = @import("vorbis/root.zig");
 const Self = @This();
 
 pub const Error = types.Error;
-pub const Config = types.VorbisConfig;
 pub const preroll_frames: u64 = 0;
 
 decoder: vorbis.Decoder,
 channels: u16,
 max_frames: u32,
-
-/// parse headers and allocate decoder state; the source supplies seek overlap
-pub fn init(
-    allocator: std.mem.Allocator,
-    config: Config,
-    format: types.AudioFormat,
-    options: types.Options,
-) Error!Codec {
-    for (config.headers) |bytes| {
-        if (bytes.len > options.bufferCapacity()) return error.LimitExceeded;
-        if (bytes.len == 0) return error.InvalidData;
-    }
-    const info = vorbis.Info.readIdentification(config.headers[0]) catch |err| {
-        return mapError(err);
-    };
-    if (
-        info.sample_rate != format.sample_rate
-            or info.channels != format.channels
-    )
-        return error.InvalidData;
-    vorbis.validateHeaderPrefix(config.headers[1], vorbis.packet_comment)
-        catch |err| return mapError(err);
-    var setup = vorbis.Setup.init(allocator, info, config.headers[2])
-        catch |err| return mapError(err);
-    defer setup.deinit();
-    return initTakeSetup(allocator, &setup, format, options);
-}
 
 /// empty source before validation; consume its parsed setup even on failure
 pub fn initTakeSetup(
@@ -69,9 +41,9 @@ pub fn initTakeSetup(
     };
     defer unit.deinit();
     return Codec.UnitAdapter(Self)
-        .initTake(
+        .init(
             allocator,
-            &unit,
+            unit.take(),
             .vorbis,
             .packets,
             max_frames,
@@ -80,7 +52,7 @@ pub fn initTakeSetup(
         );
 }
 
-/// transfer decoder ownership; leave self safe to deinit
+/// leave self empty and safe to deinit
 pub fn take(self: *Self) Self {
     return .{
         .decoder = self.decoder.take(),
@@ -93,7 +65,6 @@ pub fn take(self: *Self) Self {
 /// output must be channel aligned and hold configured max
 /// first packet may return zero, input failures require reset
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
-    try Codec.validateOutput(output, self.channels, self.max_frames);
     if (bytes.len == 0) return error.InvalidData;
     return self.decoder.decodePacket(bytes, output) catch |err| {
         return mapError(err);
@@ -105,7 +76,6 @@ pub fn reset(self: *Self) Error!void {
     self.decoder.reset();
 }
 
-/// release the decoder state
 pub fn deinit(self: *Self) void {
     self.decoder.deinit();
 }
@@ -120,11 +90,6 @@ pub const Headers = struct {
     setup: ?vorbis.Setup = null,
     /// number of headers seen so far
     count: u8 = 0,
-
-    /// initialize header state; the caller must call deinit
-    pub fn init(self: *Headers, allocator: std.mem.Allocator) void {
-        self.* = .{ .allocator = allocator };
-    }
 
     pub fn add(self: *Headers, bytes: []const u8) Error!void {
         if (self.count >= 3) return error.InvalidState;

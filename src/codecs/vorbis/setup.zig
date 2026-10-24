@@ -10,7 +10,7 @@ const mapping = @import("mapping.zig");
 const Error = root.Error;
 const Reader = root.Reader;
 
-/// owns setup tables; packet inspection requires no synthesis buffers
+/// setup tables for packet inspection without synthesis buffers
 pub const Setup = struct {
     allocator: std.mem.Allocator,
     /// stream params from the identification header
@@ -21,15 +21,12 @@ pub const Setup = struct {
     floors: []floor.Floor = &.{},
     /// residue configs of the setup header
     residues: []residue.Residue = &.{},
-    /// encoding variant of every residue
-    residue_types: []u2 = &.{},
     /// channel mappings of the setup header
     mappings: []mapping.Mapping = &.{},
     /// packet modes of the setup header
     modes: []mapping.Mode = &.{},
 
     /// parse full setup packet including framing bit, info must be validated
-    /// caller owns tables and must call deinit
     pub fn init(
         allocator: std.mem.Allocator,
         info: headers.Info,
@@ -43,20 +40,18 @@ pub const Setup = struct {
         return self;
     }
 
-    /// transfer all tables; leave self empty and safe to deinit
+    /// leave self empty and safe to deinit
     pub fn take(self: *Setup) Setup {
         const owned = self.*;
         self.* = .{ .allocator = self.allocator };
         return owned;
     }
 
-    /// release setup tables with the allocator supplied to init
     pub fn deinit(self: *Setup) void {
         for (self.codebooks) |*book| book.deinit(self.allocator);
         self.allocator.free(self.codebooks);
         self.allocator.free(self.floors);
         self.allocator.free(self.residues);
-        self.allocator.free(self.residue_types);
         for (self.mappings) |*map| map.deinit(self.allocator);
         self.allocator.free(self.mappings);
         self.allocator.free(self.modes);
@@ -86,12 +81,14 @@ pub const Setup = struct {
         // residues
         const residue_count = try reader.read(6) + 1;
         self.residues = try allocator.alloc(residue.Residue, residue_count);
-        self.residue_types = try allocator.alloc(u2, residue_count);
-        for (self.residues, self.residue_types) |*vector, *kind| {
+        for (self.residues) |*vector| {
             const residue_type = try reader.read(16);
             if (residue_type > 2) return error.UnsupportedEncoding;
-            kind.* = @intCast(residue_type);
-            vector.* = try residue.Residue.read(reader, self.codebooks.len);
+            vector.* = try residue.Residue.read(
+                reader,
+                self.codebooks.len,
+                @intCast(residue_type),
+            );
         }
         // mappings
         const mapping_count = try reader.read(6) + 1;
@@ -118,18 +115,6 @@ pub const Setup = struct {
                 if (index >= self.residues.len) return error.InvalidData;
             }
         }
-    }
-
-    /// read packet type and mode to find block size
-    pub fn blockSize(self: *const Setup, packet: []const u8) Error!u16 {
-        var reader: Reader = .init(packet);
-        if (try reader.read(1) != 0) return error.InvalidData;
-        const mode = try self.readMode(&reader);
-        const size = if (self.modes[mode].blockflag)
-            self.info.blocksize1()
-        else
-            self.info.blocksize0();
-        return @intCast(size);
     }
 
     /// read the mode number of a packet

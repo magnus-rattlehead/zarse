@@ -2,7 +2,6 @@
 const std = @import("std");
 const Error = @import("../types.zig").Error;
 
-/// owned index with caller defined locations and bounded storage
 pub fn Index(comptime Location: type) type {
     return struct {
         const Self = @This();
@@ -67,18 +66,16 @@ pub fn Index(comptime Location: type) type {
                     high = midpoint;
                 }
             }
-            // use preceding entry, clamp earlier targets to first entry
             return low -| 1;
         }
 
-        /// transfer entries; leave self empty and safe to deinit
+        /// leave self empty and safe to deinit
         pub fn take(self: *Self) Self {
             const owned = self.*;
             self.* = .{};
             return owned;
         }
 
-        /// free all index entries and reset to empty
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.entries.deinit(allocator);
             self.* = .{};

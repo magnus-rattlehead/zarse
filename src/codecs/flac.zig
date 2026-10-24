@@ -1,17 +1,16 @@
-//! Decode complete FLAC frames using the adapted audiophile/flac core.
-//! Core source attribution and MIT notice: flac/LICENSE.
+//! decode complete flac frames using the adapted audiophile/flac core
+//! core source attribution and mit notice: flac/license
 const std = @import("std");
 const types = @import("../types.zig");
 const Codec = @import("../Codec.zig");
 pub const Frame = @import("flac/Frame.zig");
-const BitReader = @import("flac/bit_reader.zig").BitReader(.big, true);
+const BitReader = @import("flac/bit_reader.zig");
 const Self = @This();
 
 pub const preroll_frames: u64 = 0;
 allocator: std.mem.Allocator,
 frame: Frame,
 
-/// Normalize upstream errors at the architecture boundary.
 pub fn mapError(err: (Frame.ReadError || types.FlacConfig.Error)) types.Error {
     return switch (err) {
         error.EndOfStream => error.TruncatedData,
@@ -49,13 +48,13 @@ pub fn init(
         return error.InvalidData;
     var unit: Self = .{
         .allocator = allocator,
-        .frame = try Frame.init(allocator, config, true),
+        .frame = try Frame.init(allocator, config),
     };
     defer unit.deinit();
     return Codec.UnitAdapter(Self)
-        .initTake(
+        .init(
             allocator,
-            &unit,
+            unit.take(),
             .flac,
             .packets,
             config.max_block_size,
@@ -64,13 +63,13 @@ pub fn init(
         );
 }
 
-/// Transfer frame storage; leave self safe to deinit.
+/// leave self empty and safe to deinit
 pub fn take(self: *Self) Self {
     return .{ .allocator = self.allocator, .frame = self.frame.take() };
 }
 
 pub fn validateConfig(info: types.FlacConfig) types.Error!void {
-    info.validate(true) catch |err| return mapError(err);
+    info.validate() catch |err| return mapError(err);
 }
 
 /// output must be channel aligned and hold the configured maximum block; input failures require reset
@@ -79,18 +78,11 @@ pub fn decodeUnit(
     bytes: []const u8,
     out: []f32,
 ) types.Error!usize {
-    try Codec.validateOutput(
-        out,
-        self.frame.info.channels,
-        self.frame.info.max_block_size,
-    );
     if (bytes.len == 0) return error.InvalidData;
-    var reader: std.Io.Reader = .fixed(bytes);
-    var bits: BitReader = .{ .child = &reader };
+    var bits: BitReader = .init(bytes);
     const count = self.frame.read(&bits, true) catch |err| return mapError(err);
-    if (reader.seek != bytes.len) return error.InvalidData;
+    if (bits.byteCount() != bytes.len) return error.InvalidData;
     const channels = self.frame.info.channels;
-    if (out.len < count * channels) return error.InvalidBufferSize;
     const scale = 1.0
         / @as(
             f32,

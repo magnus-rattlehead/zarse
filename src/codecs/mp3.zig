@@ -13,7 +13,6 @@ pub const Error = types.Error;
 // container seek already goes back far enough to rebuild saved bytes and samples
 pub const preroll_frames: u64 = 0;
 // 1152 pcm frames with room for two channels
-pub const max_samples_per_frame = 1152 * 2;
 // main data can start up to 511 bytes before current frame payload
 const max_bitreservoir_bytes = 511;
 // encoded block type for three short windows
@@ -77,7 +76,7 @@ const Scratch = struct {
     ist_pos: [2][39]u8 = @splat(@splat(0)),
 };
 
-/// borrow encoded bytes with an msb first cursor; short fields return errors
+/// msb first cursor; short fields return errors
 /// failed reads, peeks and skips leave the cursor unchanged
 const Bits = bit_reader.SliceReader(.big);
 
@@ -114,7 +113,6 @@ pub fn init(
 /// save available main data and return zero while earlier bytes are missing
 /// output must be channel aligned and hold 1152 frames; input failures require reset before reuse
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
-    try Codec.validateOutput(output, self.format.channels, 1152);
     if (bytes.len == 0) return error.InvalidData;
     return self.decodeFrame(bytes, output)
         catch |err| switch (err) {
@@ -145,9 +143,7 @@ fn decodeFrame(
         header.sampleRate() != self.format.sample_rate
             or channels != self.format.channels
     )
-        return error.FormatChanged;
-    const frames: usize = 1152;
-    if (output.len < frames * channels) return error.InvalidBufferSize;
+        return error.InvalidData;
 
     // clear saved bytes and samples for first frame or changed stream settings
     const previous = Header{ .bytes = self.state.header };
@@ -196,7 +192,7 @@ fn decodeFrame(
             &self.scratch.syn,
         );
     }
-    return frames;
+    return 1152;
 }
 
 /// clear saved bytes, transform overlap and synthesis history after a seek
@@ -204,7 +200,6 @@ pub fn reset(self: *Self) Error!void {
     self.state = .{};
 }
 
-/// adapter owns codec memory and frees it during cleanup
 pub fn deinit(_: *Self) void {}
 
 /// read granule settings and number of earlier bytes needed, reject invalid side information
@@ -215,7 +210,7 @@ fn readSideInfo(
 ) (Error || bit_reader.Error)!usize {
     const channels: usize = header.channels();
     const count = channels * 2;
-    const band_table = header.bandTableIndex();
+    const band_table = (header.bytes[2] >> 2) & 3;
     // nine bit count of how far back main data starts
     const main_data_begin: usize = try bits.read(9);
     // pack private bits and reuse flags as minimp3 does, mono uses nine bits, stereo eleven

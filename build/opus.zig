@@ -1,4 +1,4 @@
-//! portable opus 1.5.2 sources from opus/celt/silk_sources.mk.
+//! portable opus 1.5.2 sources from opus/celt/silk_sources.mk
 const std = @import("std");
 pub fn add(
     builder: *std.Build,
