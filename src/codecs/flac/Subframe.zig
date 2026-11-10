@@ -28,7 +28,7 @@ channel: u8,
 subframe_type: Type,
 /// predictor order: fixed 0..4, lpc 1..32, otherwise zero
 order: u6,
-/// trailing zero bits omitted during encoding; restored after prediction
+/// trailing zero bits omitted during encoding, restored after prediction
 wasted_bits: u6,
 
 pub fn init(channel: usize) Subframe {
@@ -209,7 +209,7 @@ fn readLinearPrediction(
     try restoreLinearPrediction(buffer, coeffs, shift);
 }
 
-/// decode rice partitions after the warm-up samples; null buffer skips reconstruction
+/// decode rice partitions after the warm-up samples. Null buffer skips reconstruction
 fn decodeResiduals(
     br: *BitReader,
     buffer: ?[]i64,

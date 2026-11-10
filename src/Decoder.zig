@@ -1,6 +1,7 @@
 //! coordinate packets, decoding, trimming, and seeking
+//! Owns allocated resources: do not duplicate ownership. Call deinit exactly once.
 //! return interleaved f32 samples in source channel order
-//! integer pcm is normalized to negative one through one; floats retain their scale
+//! integer pcm is normalized to negative one through one. Floats retain their scale
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @import("Source.zig");
@@ -8,7 +9,7 @@ const PacketSource = @import("PacketSource.zig");
 const Codec = @import("Codec.zig");
 const Decoder = @This();
 
-pub const Error = types.DecoderError;
+pub const Error = types.Error;
 pub const Options = types.Options;
 
 allocator: std.mem.Allocator,
@@ -39,19 +40,19 @@ pub fn init(
     options: Options,
 ) Error!Decoder {
     var packets = try PacketSource.init(allocator, source, options);
-    defer packets.deinit();
+    errdefer packets.deinit();
     var codec = try Codec.initSource(allocator, &packets, options);
-    defer codec.deinit();
+    errdefer codec.deinit();
     var result = Decoder{
         .allocator = allocator,
         .metadata = packets.info(),
         .presentation = packets.presentation,
         .decoded_frame = packets.decoded_origin,
         .last_frame = &.{},
-        .packets = packets.take(),
-        .codec = codec.take(),
+        .packets = packets,
+        .codec = codec,
     };
-    errdefer result.deinit();
+    errdefer allocator.free(result.last_frame);
     if (result.metadata.channels > result.inline_frame.len) {
         result.last_frame = try allocator.alloc(f32, result.metadata.channels);
     }
@@ -69,29 +70,12 @@ pub fn init(
     return result;
 }
 
-/// leave self empty and safe to deinit
-pub fn take(self: *Decoder) Decoder {
-    const owned = self.*;
-    self.* = .{
-        .allocator = self.allocator,
-        .packets = .{},
-        .codec = .{},
-        .metadata = self.metadata,
-        .presentation = .{},
-        .finished = true,
-    };
-    return owned;
-}
-
-/// leave input open
+/// Free owned resources exactly once, leave input open, and invalidate self.
 pub fn deinit(self: *Decoder) void {
     self.codec.deinit();
     self.packets.deinit();
     self.allocator.free(self.last_frame);
-    self.last_frame = &.{};
-    self.pending = &.{};
-    self.silence = 0;
-    self.finished = true;
+    self.* = undefined;
 }
 
 fn history(self: *Decoder) []f32 {
@@ -106,15 +90,16 @@ pub fn info(self: *const Decoder) types.Info {
     return self.metadata;
 }
 
-/// return frames written; leave unused output untouched; zero means end
+/// Return PCM frames written (one sample per channel per frame).
+/// Leave unused output untouched. Zero means end.
 /// output must be nonempty and channel aligned
 /// after an input error, discard output and seek successfully or reopen
-pub fn read(self: *Decoder, out: []f32) Error!usize {
+pub fn readFrames(self: *Decoder, out: []f32) Error!usize {
     if (self.failure) |err| return err;
     if (out.len == 0 or out.len % self.metadata.channels != 0) {
         return error.InvalidBufferSize;
     }
-    const count = self.readFrames(out) catch |err| {
+    const count = self.readInto(out) catch |err| {
         self.failure = err;
         return err;
     };
@@ -126,7 +111,7 @@ pub fn read(self: *Decoder, out: []f32) Error!usize {
 }
 
 /// fill output from pending samples, held silence and new codec blocks
-fn readFrames(self: *Decoder, out: []f32) Error!usize {
+fn readInto(self: *Decoder, out: []f32) Error!usize {
     const channels = self.metadata.channels;
     var written: usize = 0;
     while (written < out.len) {
@@ -180,7 +165,7 @@ fn advance(self: *Decoder) Error!bool {
                 if (self.pending.len != 0) return true;
             },
             .presentation => |bounds| {
-                // leading trim is fixed at opening; later events may establish the end
+                // leading trim is fixed at opening. Later events may establish the end
                 if (bounds.start != self.presentation.start)
                     return error.InvalidData;
                 if (self.presentation.end) |end| {
@@ -211,7 +196,7 @@ fn advance(self: *Decoder) Error!bool {
             .end => {
                 self.finished = true;
                 const total = self.decoded_frame;
-                // mp3 declared counts cap playback; clean eof may end playback earlier
+                // mp3 declared counts cap playback. Clean eof may end playback earlier
                 if (self.metadata.format != .mp3) {
                     if (self.packets.info().total_frames) |expected| {
                         const count = total - self.packets.decoded_origin;
@@ -265,9 +250,9 @@ fn acceptSamples(self: *Decoder, samples: []const f32) Error!void {
     }
 }
 
-/// seek to a presented frame; success clears prior input errors
+/// seek to a presented frame. Success clears prior input errors
 /// unsupported seeking and known range rejections leave decoder state unchanged
-pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
+pub fn seekToFrame(self: *Decoder, frame: u64) Error!void {
     if (!self.packets.seekable) return error.Unseekable;
     if (self.metadata.total_frames) |total| {
         if (frame > total) return error.OutOfRange;
@@ -307,6 +292,6 @@ fn seekInternal(self: *Decoder, target: u64) Error!void {
 }
 
 /// return the frame position after the last successful read or seek
-pub fn tellFrame(self: *const Decoder) u64 {
+pub fn framePosition(self: *const Decoder) u64 {
     return self.frame_offset;
 }

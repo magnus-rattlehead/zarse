@@ -57,7 +57,7 @@ pub const Setup = @import("setup.zig").Setup;
 /// validate a header's type and signature before accessing its payload
 pub const validateHeaderPrefix = @import("headers.zig").validatePrefix;
 
-/// number of bits needed to represent a value; zero consumes no bits
+/// number of bits needed to represent a value. Zero consumes no bits
 pub fn ilog(value: u32) u6 {
     return @as(u6, 32) - @clz(value);
 }

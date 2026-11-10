@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.Writer.init(.stdout(), init.io, &buffer);
     var frames: u64 = 0;
     while (true) {
-        const count = try decoder.read(samples);
+        const count = try decoder.readFrames(samples);
         if (count == 0) break;
         if (raw_pcm) {
             for (samples[0..count * info.channels]) |sample| {

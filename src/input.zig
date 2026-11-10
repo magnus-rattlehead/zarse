@@ -16,7 +16,7 @@ pub fn compact(buffer: []u8, length: *usize, consumed: *usize) void {
 }
 
 /// compact and refill state with source, buffer, length, consumed, offset, and eof fields
-/// return whether new bytes were read; existing buffer slices may be invalidated
+/// return whether new bytes were read. Existing buffer slices may be invalidated
 pub fn refill(state: anytype) types.Error!bool {
     if (state.eof) return false;
     // move buffer origin by discarded bytes, unread audio keeps absolute position
@@ -32,7 +32,7 @@ pub fn refill(state: anytype) types.Error!bool {
     return count != 0;
 }
 
-/// fill output or report truncated input; preserve the reader's other errors
+/// fill output or report truncated input and preserve the reader's other errors
 pub fn readRequired(reader: anytype, out: []u8) !void {
     if (try reader.readSliceShort(out) != out.len) return error.TruncatedData;
 }

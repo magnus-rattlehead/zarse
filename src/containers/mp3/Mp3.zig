@@ -102,8 +102,8 @@ pub fn init(
         // delay includes encoder leading samples and decoder alignment adjustment
         self.presentation.start = tag.delay;
         self.end_padding = @intCast(@max(0, tag.padding));
-        // follow minimp3 guarded trim subtraction; a nonzero playable count
-        // limits playback; zero leaves reading uncapped until physical eof
+        // follow minimp3 guarded trim subtraction. A nonzero playable count
+        // limits playback. Zero leaves reading uncapped until physical eof
         if (self.metadata.total_frames) |total| {
             const padding: u64 = self.end_padding;
             var playable = total;
@@ -157,7 +157,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
         // enough future samples ensure padding cannot reach this packet
         const needed = @as(u64, current.samples) + self.end_padding;
         while (samples < needed) {
-            // retain inspected frames; insufficient buffer size returns LimitExceeded
+            // retain inspected frames. Insufficient buffer size returns LimitExceeded
             const following = try self.bufferedFrame(ahead) orelse {
                 // eof before enough future samples, padding may overlap this packet
                 const total = std.math.add(u64, self.frame, samples)
@@ -170,7 +170,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
         }
     }
 
-    // lookahead can compact the buffer; take the packet slice only afterward
+    // lookahead can compact the buffer. Take the packet slice only afterward
     const bytes = self.buffer[self.consumed..][0..current.length];
     self.consumed += current.length;
     self.frame = end;
@@ -225,7 +225,7 @@ fn finishStream(self: *Self, total: u64) Error!PacketSource.Event {
     // lookahead may reach eof while affected audio still buffered
     if (self.presentation.end == null) {
         self.metadata.total_frames = total;
-        // an early eof can leave no playable samples; ignore padding that cannot
+        // an early eof can leave no playable samples. Ignore padding that cannot
         // be subtracted, minimp3 does the same thing
         var playable = total;
         if (playable >= self.presentation.start)
@@ -302,7 +302,7 @@ pub fn deinit(self: *Self) void {
     allocator.destroy(self);
 }
 
-/// compact consumed bytes and refill; return whether new bytes were read
+/// compact consumed bytes, refill, and return whether new bytes were read
 /// false can leave buffered bytes available for the caller to inspect
 fn fill(self: *Self) Error!bool {
     return input_helpers.refill(self);
@@ -327,7 +327,7 @@ fn skipId3v2(self: *Self) Error!void {
         };
         if (header[5] & reserved != 0) return error.InvalidData;
         var payload: usize = 0;
-        // synchsafe size, each byte contributes 7 bits; its high bit is zero
+        // synchsafe size, each byte contributes 7 bits. Its high bit is zero
         for (header[6..10]) |byte| {
             if (byte & 0x80 != 0) return error.InvalidData;
             payload = (payload << 7) | byte;
@@ -351,7 +351,7 @@ fn skipId3v2(self: *Self) Error!void {
 /// return buffered audio without recognized trailing metadata
 fn skipId3v1(bytes: []const u8) []const u8 {
     var end = bytes.len;
-    // id3v1 occupies 128 bytes; an optional tag+ extension precedes it
+    // id3v1 occupies 128 bytes. An optional tag+ extension precedes it
     if (end >= 128 and std.mem.eql(u8, bytes[end - 128..][0..3], "TAG")) {
         end -= 128;
         if (end >= 227 and std.mem.eql(u8, bytes[end - 227..][0..4], "TAG+"))
@@ -450,11 +450,11 @@ fn buildIndex(self: *Self) Error!void {
     _ = try self.bufferedFrame(0) orelse return error.TruncatedData;
     // unknown end can now be announced at opening, declared limits stay authoritative
     if (self.presentation.end == null) _ = try self.finishStream(total);
-    self.index = index.take();
+    self.index = index;
 }
 
 /// ensure contiguous unread bytes, false if eof leaves too few
-/// invalidates buffer slices; oversized requests return an error
+/// invalidates buffer slices. Oversized requests return an error
 fn ensureBytes(self: *Self, count: usize) Error!bool {
     // lookahead must retain all bytes from unread cursor through requested end
     if (count > self.buffer.len) return error.LimitExceeded;
@@ -479,7 +479,7 @@ fn ensureAudio(self: *Self, count: usize) Error!bool {
 
 /// confirm a following compatible header, or an exact single frame at eof
 /// free format requires three compatible headers to infer the frame size
-/// return the selected frame buffer offset and length; leave it unconsumed
+/// return the selected frame buffer offset and length and leave it unconsumed
 fn initialFrame(self: *Self) Error!framing.Match {
     while (try self.ensureAudio(4)) {
         // framing inspects bytes only, this reader decides when to request more

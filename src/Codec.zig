@@ -1,4 +1,4 @@
-//! decode encoded units into pcm; select codecs and manage sample storage
+//! decode encoded units into pcm, select codecs, and manage sample storage
 const std = @import("std");
 const types = @import("types.zig");
 const pcm = @import("codecs/pcm.zig");
@@ -8,12 +8,11 @@ const Codec = @This();
 
 pub const Error = types.Error;
 
-backend: Backend = .empty,
+backend: Backend,
 /// decoding history needed before a seek target, in frames
 preroll_frames: u64 = 0,
 
 const Backend = union(enum) {
-    empty: void,
     pcm: if (features.pcm) *UnitAdapter(pcm) else void,
     alaw: if (features.wave_codecs) *UnitAdapter(wave.alaw) else void,
     mulaw: if (features.wave_codecs) *UnitAdapter(wave.mulaw) else void,
@@ -99,7 +98,7 @@ pub fn decode(self: *Codec, bytes: []const u8) Error![]const f32 {
     };
 }
 
-/// clear history; keep config
+/// clear history and keep config
 pub fn reset(self: *Codec) Error!void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) == void)
@@ -109,20 +108,13 @@ pub fn reset(self: *Codec) Error!void {
     }
 }
 
-/// leave self empty and safe to deinit
-pub fn take(self: *Codec) Codec {
-    const owned = self.*;
-    self.* = .{};
-    return owned;
-}
-
 pub fn deinit(self: *Codec) void {
     switch (self.backend) {
         inline else => |backend| if (@TypeOf(backend) != void) {
                 backend.deinit();
             },
     }
-    self.* = .{};
+    self.* = undefined;
 }
 
 /// manage codec state and sample storage
@@ -131,7 +123,8 @@ pub fn UnitAdapter(comptime Unit: type) type {
         const Self = @This();
         allocator: std.mem.Allocator,
         unit: Unit,
-        scheme: types.InputScheme,
+        /// Encoded bytes per fixed frame or block, null for container-framed packets.
+        unit_bytes: ?u32,
         channels: u16,
         max_frames_per_unit: u32,
         output: []f32 = &.{},
@@ -141,7 +134,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             allocator: std.mem.Allocator,
             unit: Unit,
             comptime backend: std.meta.Tag(Backend),
-            scheme: types.InputScheme,
+            unit_bytes: ?u32,
             max_frames_per_unit: u32,
             format: types.AudioFormat,
             options: types.Options,
@@ -157,7 +150,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             }
             // packet codecs use one unit, fixed units may share one buffer
             var units: usize = 1;
-            if (scheme.unitBytes()) |size| {
+            if (unit_bytes) |size| {
                 if (size == 0) return error.InvalidData;
                 if (size > options.bufferCapacity()) return error.LimitExceeded;
                 units = options.bufferCapacity() / size;
@@ -173,7 +166,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
             self.* = .{
                 .allocator = allocator,
                 .unit = owned,
-                .scheme = scheme,
+                .unit_bytes = unit_bytes,
                 .channels = format.channels,
                 .max_frames_per_unit = max_frames_per_unit,
                 .output = output,
@@ -187,7 +180,7 @@ pub fn UnitAdapter(comptime Unit: type) type {
         fn decode(self: *Self, bytes: []const u8) Error![]const f32 {
             if (bytes.len == 0) return error.InvalidData;
             var units: usize = 1;
-            if (self.scheme.unitBytes()) |size| {
+            if (self.unit_bytes) |size| {
                 if (bytes.len % size != 0) return error.InvalidData;
                 units = bytes.len / size;
             }

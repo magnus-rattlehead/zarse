@@ -6,7 +6,7 @@ pub const maxBodyBytes = 255 * 255;
 // 27 fixed header bytes plus up to 255 laces
 pub const maxHeaderBytes = 27 + 255;
 pub const maxPageBytes = maxHeaderBytes + maxBodyBytes;
-pub const Crc = std.hash.crc.Crc(
+pub const Crc = std.hash.crc.Generic(
     u32,
     .{
         .polynomial = 0x04c11db7,
@@ -60,12 +60,12 @@ pub const Page = struct {
     /// count terminating laces, includes packets begun on previous page
     pub fn packetCount(self: Page) usize {
         var count: usize = 0;
-        // 255 continues a packet; a smaller lace ends it
+        // 255 continues a packet. A smaller lace ends it
         // exact multiples of 255 need a zero terminator
         for (self.segments()) |segment| count += @intFromBool(segment < 255);
         return count;
     }
-    /// calculate crc with a zero checksum field; leave input unchanged
+    /// calculate crc with a zero checksum field and leave input unchanged
     pub fn checksum(self: Page) u32 {
         var crc = Crc.init();
         crc.update(self.header[0..22]);

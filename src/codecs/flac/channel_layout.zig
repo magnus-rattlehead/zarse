@@ -27,13 +27,13 @@ pub const ChannelLayout = enum(u4) {
     /// front left, front right, center, lfe, back left, back right, side left, side right
     surround_7_1 = 8,
 
-    /// left, side; right = left - side
+    /// left, side, right = left - side
     left_side = 9,
 
-    /// side, right; left = side + right
+    /// side, right, left = side + right
     right_side = 10,
 
-    /// mid, side; the side low bit restores the precision lost when averaging
+    /// mid, side, the side low bit restores the precision lost when averaging
     mid_side = 11,
 
     pub inline fn isSideLayout(self: ChannelLayout) bool {

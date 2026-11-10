@@ -20,13 +20,13 @@ pub fn init(
 ) Error!Codec {
     if (format.sample_rate == 0) return error.InvalidData;
     // pcm unit contains exactly one sample per channel
-    const input_scheme = try scheme(config, format.channels);
+    const unit_bytes = try unitBytes(config, format.channels);
     const unit = Self{ .format = config, .channels = format.channels };
     return Codec.UnitAdapter(Self)
-        .init(allocator, unit, .pcm, input_scheme, 1, format, options);
+        .init(allocator, unit, .pcm, unit_bytes, 1, format, options);
 }
 
-/// convert complete frames; output must fit all samples
+/// convert complete frames. Output must fit all samples
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     const size = self.format.sample_type.byteSize();
     if (bytes.len == 0) return error.InvalidData;
@@ -58,13 +58,12 @@ fn convertSamples(
     };
     const size = comptime sample_type.byteSize();
     var index: usize = 0;
-    // packed 24-bit samples use the scalar reader; the other storage widths
+    // packed 24-bit samples use the scalar reader. The other storage widths
     // map directly to integer or floating point vector lanes
     if (sample_type != .signed24) {
         const lanes = std.simd.suggestVectorLength(f32) orelse 4;
         const Int = switch (sample_type) {
             .unsigned8 => u8,
-            .signed8 => i8,
             .signed16 => i16,
             .signed32 => i32,
             .signed64 => i64,
@@ -113,13 +112,11 @@ pub fn reset(_: *Self) Error!void {}
 pub fn deinit(_: *Self) void {}
 
 /// validate the format and return its frame size
-pub fn scheme(format: Config, channels: u16) Error!types.InputScheme {
+pub fn unitBytes(format: Config, channels: u16) Error!u32 {
     if (channels == 0) return error.InvalidData;
     try validateFormat(format);
-    return .{
-        .samples = @as(u32, channels)
-            * @as(u32, @intCast(format.sample_type.byteSize())),
-    };
+    return @as(u32, channels)
+        * @as(u32, @intCast(format.sample_type.byteSize()));
 }
 
 /// reject zero valid_bits or precision beyond the storage width
@@ -138,8 +135,6 @@ fn decodeSample(bytes: []const u8, format: types.PcmFormat) f32 {
     // float formats preserve encoded scale, valid bits already left aligned
     return switch (format.sample_type) {
         .unsigned8 => (@as(f32, @floatFromInt(bytes[0])) - 128.0) / 128.0,
-        .signed8 => @as(f32, @floatFromInt(@as(i8, @bitCast(bytes[0]))))
-            / 0x1p7,
         .signed16 => @as(
             f32,
             @floatFromInt(std.mem.readInt(i16, bytes[0..2], endian)),

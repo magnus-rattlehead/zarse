@@ -1,6 +1,6 @@
 //! input with optional seeking and size
 //! copies share one reader, give the pipeline exclusive access until cleanup
-//! keep reader, buffer, and input in place until cleanup; close input separately
+//! keep reader, buffer, and input in place until cleanup and close input separately
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @This();
@@ -22,13 +22,14 @@ pub fn fromFile(reader: *std.Io.File.Reader) Source {
     };
 }
 
-/// keep the input bytes unchanged while decoding
+/// reader must be constructed with std.Io.Reader.fixed.
+/// Keep the reader in place and its input bytes unchanged while decoding.
 pub fn fromFixed(reader: *std.Io.Reader) Source {
     return .{ .reader = reader, .seek_to = fixedSeek, .get_size = fixedSize };
 }
 
-/// seek absolutely; unsupported seeks leave input unchanged
-pub fn seekTo(self: Source, offset: u64) types.SourceSeekError!void {
+/// seek absolutely. Unsupported seeks leave input unchanged
+pub fn seekTo(self: Source, offset: u64) types.SeekError!void {
     const seek = self.seek_to orelse return error.Unseekable;
     try seek(self.reader, offset);
 }
@@ -60,7 +61,7 @@ fn fileSize(reader: *std.Io.Reader) types.SizeError!u64 {
         };
 }
 
-/// set the cursor; reject offsets beyond the buffer
+/// set the cursor and reject offsets beyond the buffer
 fn fixedSeek(reader: *std.Io.Reader, offset: u64) types.SeekError!void {
     if (offset > reader.end) return error.EndOfStream;
     reader.seek = @intCast(offset);

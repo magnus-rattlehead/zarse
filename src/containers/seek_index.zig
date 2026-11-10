@@ -1,4 +1,4 @@
-//! bound seek index memory; callers define locations and frame positions
+//! bound seek index memory. Callers define locations and frame positions
 const std = @import("std");
 const Error = @import("../types.zig").Error;
 
@@ -31,7 +31,7 @@ pub fn Index(comptime Location: type) type {
                 return error.LimitExceeded;
             }
             if (self.entries.items.len == self.entries.capacity) {
-                // start with up to 64 entries; double within the budget
+                // start with up to 64 entries and double within the budget
                 const capacity = @min(
                     max_entries,
                     @max(@as(usize, 64), self.entries.capacity *| 2),
@@ -44,7 +44,7 @@ pub fn Index(comptime Location: type) type {
             self.entries.appendAssumeCapacity(entry);
         }
 
-        /// find the last entry at or before target; clamp earlier targets to the first
+        /// find the last entry at or before target and clamp earlier targets to the first
         /// return null for an empty index
         pub fn atOrBefore(self: *const Self, target: u64) ?Entry {
             const index = self.indexAtOrBefore(target) orelse return null;
@@ -55,25 +55,17 @@ pub fn Index(comptime Location: type) type {
         /// return null for empty index
         pub fn indexAtOrBefore(self: *const Self, target: u64) ?usize {
             if (self.entries.items.len == 0) return null;
-            var low: usize = 0;
-            var high = self.entries.items.len;
-            // upper bound search, first entry strictly after target
-            while (low < high) {
-                const midpoint = low + (high - low) / 2;
-                if (self.entries.items[midpoint].frame <= target) {
-                    low = midpoint + 1;
-                } else {
-                    high = midpoint;
-                }
-            }
-            return low -| 1;
+            const upper = std.sort.upperBound(
+                Entry,
+                self.entries.items,
+                target,
+                compareFrame,
+            );
+            return upper -| 1;
         }
 
-        /// leave self empty and safe to deinit
-        pub fn take(self: *Self) Self {
-            const owned = self.*;
-            self.* = .{};
-            return owned;
+        fn compareFrame(target: u64, entry: Entry) std.math.Order {
+            return std.math.order(target, entry.frame);
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {

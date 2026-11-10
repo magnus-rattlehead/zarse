@@ -3,23 +3,11 @@ const std = @import("std");
 const types = @import("types.zig");
 const Source = @import("Source.zig");
 const features = @import("build_options");
-const Wave = if (features.wav)
-    @import("containers/wave/root.zig").Reader
-else
-    void;
-const Ogg = if (features.ogg)
-    @import("containers/ogg/root.zig").Reader
-else
-    void;
-const Mp3 = if (features.mp3)
-    @import("containers/mp3/root.zig").Reader
-else
-    void;
+const Wave = if (features.wav) @import("containers/wave/Wave.zig") else void;
+const Ogg = if (features.ogg) @import("containers/ogg/Ogg.zig") else void;
+const Mp3 = if (features.mp3) @import("containers/mp3/Mp3.zig") else void;
 const PacketSource = @This();
-const Flac = if (features.flac)
-    @import("containers/flac/root.zig").Reader
-else
-    void;
+const Flac = if (features.flac) @import("containers/flac/Flac.zig") else void;
 
 pub const Error = types.Error;
 const VorbisSetup = if (features.vorbis)
@@ -28,7 +16,6 @@ else
     void;
 
 const Backend = union(enum) {
-    empty: void,
     wave: if (features.wav) *Wave else void,
     ogg: if (features.ogg) *Ogg else void,
     mp3: if (features.mp3) *Mp3 else void,
@@ -39,7 +26,7 @@ const containers = (if (features.wav) .{Wave} else .{})
     ++ (if (features.mp3) .{Mp3} else .{})
     ++ (if (features.flac) .{Flac} else .{});
 
-backend: Backend = .empty,
+backend: Backend,
 encoding: types.DecodingScheme = .unsupported,
 presentation: types.Presentation = .{},
 /// first decoded sample position before trimming
@@ -60,8 +47,8 @@ pub const Event = union(enum) {
 pub const SeekResult = struct { frame: u64 };
 
 /// detect and open a container
-/// seekable input may be indexed; sequential input is parsed incrementally
-/// requires exclusive reader access until deinit; leaves input open
+/// seekable input may be indexed. Sequential input is parsed incrementally
+/// requires exclusive reader access until deinit and leaves input open
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -82,14 +69,6 @@ pub fn init(
         }
     }
     return error.UnsupportedFormat;
-}
-
-/// leave self empty and safe to deinit
-/// finish using returned packets before calling
-pub fn take(self: *PacketSource) PacketSource {
-    const owned = self.*;
-    self.* = .{};
-    return owned;
 }
 
 /// remove and return the cached vorbis setup
@@ -157,5 +136,5 @@ pub fn deinit(self: *PacketSource) void {
                 container.deinit();
             },
     }
-    self.* = .{};
+    self.* = undefined;
 }

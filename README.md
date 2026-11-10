@@ -1,6 +1,6 @@
 # zarse (**z**ig **a**udio pa**rse**r)
 
-A small audio reading and decoding library for **Zig 0.16.0**.
+A small audio reading and decoding library for **Zig 0.17.1**.
 
 ## Quick start
 

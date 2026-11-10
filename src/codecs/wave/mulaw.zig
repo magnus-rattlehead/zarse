@@ -21,16 +21,16 @@ pub fn init(
             allocator,
             .{ .channels = format.channels },
             .mulaw,
-            try scheme(format.channels),
+            try unitBytes(format.channels),
             1,
             format,
             options,
         );
 }
 
-pub fn scheme(channels: u16) Error!types.InputScheme {
+pub fn unitBytes(channels: u16) Error!u32 {
     if (channels == 0) return error.InvalidData;
-    return .{ .samples = channels };
+    return channels;
 }
 
 pub fn decodeUnit(self: *Self, bytes: []const u8, _: []f32) Error!usize {

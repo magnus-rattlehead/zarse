@@ -76,7 +76,7 @@ pub const Info = struct {
     }
 };
 
-/// validate the type and signature; a short prefix returns TruncatedData
+/// validate the type and signature. A short prefix returns TruncatedData
 pub fn validatePrefix(packet: []const u8, packet_type: u8) Error!void {
     if (packet.len < 7) return error.TruncatedData;
     if (packet[0] != packet_type or !std.mem.eql(u8, packet[1..7], signature)) {

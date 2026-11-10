@@ -1,15 +1,15 @@
 //! read vendor and comment fields for vorbis, opus, and flac
-//! keep input unchanged; callers handle signatures, framing, and padding
+//! keep input unchanged. Callers handle signatures, framing, and padding
 const std = @import("std");
 const Error = @import("../types.zig").ValidationError;
 const Self = @This();
 
 vendor: []const u8,
-/// unread fields and trailer; only the trailer remains after iteration
+/// unread fields and trailer, only the trailer remains after iteration
 remaining: []const u8,
 comments_left: u32,
 
-/// read vendor and count after the signature; iterate to validate all lengths
+/// read vendor and count after the signature and iterate to validate all lengths
 pub fn init(bytes: []const u8) Error!Self {
     var remaining = bytes;
     const vendor = try readField(&remaining);
@@ -26,8 +26,8 @@ pub fn init(bytes: []const u8) Error!Self {
     };
 }
 
-/// return the next comment, or null at the end; empty comments are valid
-/// validate lengths here; callers interpret text and field names
+/// return the next comment, or null at the end. Empty comments are valid
+/// validate lengths here. Callers interpret text and field names
 pub fn next(self: *Self) Error!?[]const u8 {
     if (self.comments_left == 0) return null;
     const comment = try readField(&self.remaining);

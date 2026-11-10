@@ -10,10 +10,8 @@ pub const Error = types.Error;
 pub const preroll_frames: u64 = 0;
 
 decoder: vorbis.Decoder,
-channels: u16,
-max_frames: u32,
 
-/// empty source before validation; consume its parsed setup even on failure
+/// empty source before validation and consume its parsed setup even on failure
 pub fn initTakeSetup(
     allocator: std.mem.Allocator,
     source: *vorbis.Setup,
@@ -29,36 +27,13 @@ pub fn initTakeSetup(
     ) {
         return error.InvalidData;
     }
-    var decoder = vorbis.Decoder.initTakeSetup(allocator, &owned_setup)
+    const decoder = vorbis.Decoder.initTakeSetup(allocator, &owned_setup)
         catch |err| return mapError(err);
-    defer decoder.deinit();
     // two long blocks produce at most half a block of samples per channel
     const max_frames: u32 = @intCast(info.blocksize1() / 2);
-    var unit = Self{
-        .decoder = decoder.take(),
-        .channels = format.channels,
-        .max_frames = max_frames,
-    };
-    defer unit.deinit();
+    const unit = Self{ .decoder = decoder };
     return Codec.UnitAdapter(Self)
-        .init(
-            allocator,
-            unit.take(),
-            .vorbis,
-            .packets,
-            max_frames,
-            format,
-            options,
-        );
-}
-
-/// leave self empty and safe to deinit
-pub fn take(self: *Self) Self {
-    return .{
-        .decoder = self.decoder.take(),
-        .channels = self.channels,
-        .max_frames = self.max_frames,
-    };
+        .init(allocator, unit, .vorbis, null, max_frames, format, options);
 }
 
 /// decode packet to interleaved pcm, return frames per channel
@@ -137,7 +112,7 @@ pub const Headers = struct {
         self.* = undefined;
     }
 
-    /// transfer setup tables; retain only the container's block-size metadata
+    /// transfer setup tables and retain only the container's block-size metadata
     pub fn takeSetup(self: *Headers) ?vorbis.Setup {
         const setup = if (self.setup) |*setup| setup.take() else return null;
         self.setup = null;

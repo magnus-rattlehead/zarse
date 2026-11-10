@@ -11,7 +11,7 @@ const SeekIndex = @import("../seek_index.zig").Index(SegmentLocation);
 /// cached wavl segment and held silence history
 const SegmentLocation = struct {
     segment: types.Segment,
-    /// last data frame, or zero before any data; silence holds this value
+    /// last data frame, or zero before any data. Silence holds this value
     previous_frame: u64 = 0,
 };
 const Self = @This();
@@ -25,7 +25,7 @@ segment_cursor: usize = 0,
 /// audio segments and their untrimmed frame positions
 index: SeekIndex = .{},
 metadata: types.Info = undefined,
-scheme: types.InputScheme = .packets,
+unit_bytes: u32 = 0,
 buffer: []u8 = &.{},
 packet_capacity: usize = 0,
 /// retain final audio beyond the packet buffer while resolving wave64 padding
@@ -35,13 +35,13 @@ tail_position: usize = 0,
 current: ?types.Segment = null,
 segment_bytes: u64 = 0,
 
-/// recognize a four byte prefix; validate full headers when opening
+/// recognize a four byte prefix and validate full headers when opening
 pub fn probe(prefix: []const u8) bool {
     return riff.probe(prefix);
 }
 
 /// open input after detection consumed its four byte prefix
-/// allocate buffers and any wavl index; parse ranges for seekable input
+/// allocate buffers and any wavl index, then parse ranges for seekable input
 /// or walk chunks incrementally for sequential input
 pub fn init(
     allocator: std.mem.Allocator,
@@ -65,10 +65,8 @@ pub fn init(
     state.current = try walker.next();
     const fmt = walker.format orelse return error.InvalidData;
     const encoding = fmt.decodingScheme(walker.byte_order);
-    state.scheme = if (fmt.fixedWidth()) .{ .samples = fmt.block_align } else .{
-        .blocks = fmt.block_align,
-    };
-    const unit = state.scheme.unitBytes().?;
+    state.unit_bytes = fmt.block_align;
+    const unit = state.unit_bytes;
     if (unit > state.buffer.len) return error.LimitExceeded;
     state.packet_capacity = state.buffer.len / unit * unit;
     state.seekable = seekable and fmt.fixedWidth();
@@ -127,10 +125,9 @@ pub fn init(
     };
 }
 
-/// return aligned audio, held silence, or end; packet bytes expire on the next read
+/// return aligned audio, held silence, or end. Packet bytes expire on the next read
 pub fn next(self: *Self) Error!PacketSource.Event {
-    const scheme = self.scheme;
-    const unit = scheme.unitBytes().?;
+    const unit = self.unit_bytes;
     while (true) {
         if (self.tail_position < self.tail_length) {
             const count = @min(
@@ -142,7 +139,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 self.padding_tail[self.tail_position..][0..count],
             );
             self.tail_position += count;
-            return self.audioPacket(count, scheme);
+            return self.audioPacket(count);
         }
         // fetch next segment only after current data or silence exhausted
         if (self.current == null) {
@@ -219,7 +216,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
                 self.segment_bytes += count;
                 if (self.segment_bytes == range.length) self.current = null;
                 if (count == 0) continue;
-                return self.audioPacket(count, scheme);
+                return self.audioPacket(count);
             },
         }
     }
@@ -236,12 +233,8 @@ fn nextSegment(self: *Self) Error!?types.Segment {
 }
 
 /// publish whole audio units and advance their untrimmed timeline
-fn audioPacket(
-    self: *Self,
-    count: usize,
-    scheme: types.InputScheme,
-) Error!PacketSource.Event {
-    const unit = scheme.unitBytes().?;
+fn audioPacket(self: *Self, count: usize) Error!PacketSource.Event {
+    const unit = self.unit_bytes;
     if (count % unit != 0) return error.InvalidData;
     return .{ .packet = .{ .bytes = self.buffer[0..count] } };
 }
@@ -259,7 +252,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
         0,
         self.metadata.total_frames,
     );
-    const scheme = self.scheme;
+    const unit = self.unit_bytes;
     self.tail_length = 0;
     self.tail_position = 0;
     self.current = null;
@@ -285,7 +278,7 @@ pub fn seek(self: *Self, frame: u64) Error!PacketSource.SeekResult {
     const remaining = anchor - segment_frame;
     switch (self.current.?) {
         .data => |range| {
-            self.segment_bytes = remaining * scheme.samples;
+            self.segment_bytes = remaining * unit;
             try self.source.seekTo(range.offset + self.segment_bytes);
         },
         .silence => |count| self.current = .{ .silence = count - remaining },

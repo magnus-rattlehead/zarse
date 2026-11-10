@@ -1,4 +1,4 @@
-//! read one opus or vorbis stream; framing handles pages and packets
+//! read one opus or vorbis stream. Framing handles pages and packets
 //! codec headers, timing, trimming, and seeking are handled here
 //! opus mapping: https://www.rfc-editor.org/rfc/rfc7845.html
 const std = @import("std");
@@ -52,14 +52,14 @@ first_audio: bool = true,
 bounds_pending: bool = false,
 seekable: bool = false,
 
-/// recognize the prefix; validate pages when opening
+/// recognize the prefix and validate pages when opening
 pub fn probe(prefix: []const u8) bool {
     return std.mem.startsWith(u8, prefix, "OggS");
 }
 
-/// open after the four byte prefix; keep input unchanged
-/// allocate packet storage and any seek index; scan seekable input
-/// packets and tags must fit the configured buffer; errors may move input
+/// open after the four byte prefix and keep input unchanged
+/// allocate packet storage and any seek index, then scan seekable input
+/// packets and tags must fit the configured buffer. Errors may move input
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -74,7 +74,6 @@ pub fn init(
         .pages = .{
             .allocator = allocator,
             .input = .{ .source = source, .prefix = prefix },
-            .limit = options.max_payload_bytes,
         },
         .options = options,
     };
@@ -150,7 +149,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
     };
 }
 
-/// return metadata with untrimmed counts; the decoder reports trimmed counts
+/// return metadata with untrimmed counts. The decoder reports trimmed counts
 pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
@@ -193,7 +192,7 @@ pub fn deinit(self: *Self) void {
     allocator.destroy(self);
 }
 
-/// validate the identification header; copy mapping, pre skip, and gain
+/// validate the identification header and copy mapping, pre skip, and gain
 fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
     // opus head: 8 signature bytes, version, channels, u16 pre skip,
     // u32 input rate, i16 gain, then mapping family
@@ -224,7 +223,7 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
         .little,
     );
     self.config.gain_q8 = std.mem.readInt(i16, packet_bytes[16..18], .little);
-    // family 0 implies mono or stereo; family 1 carries a channel map
+    // family 0 implies mono or stereo. Family 1 carries a channel map
     switch (packet_bytes[18]) {
         0 => {
             if (
@@ -260,7 +259,7 @@ fn parseOpusHead(self: *Self, packet_bytes: []const u8) Error!void {
     );
 }
 
-/// validate vendor and comment lengths; allow trailing padding
+/// validate vendor and comment lengths and allow trailing padding
 fn parseOpusTags(packet_bytes: []const u8) Error!void {
     if (!std.mem.startsWith(u8, packet_bytes, "OpusTags")) {
         return error.InvalidData;
@@ -272,12 +271,12 @@ fn parseOpusTags(packet_bytes: []const u8) Error!void {
 }
 
 /// read duration from the first stream toc, in 48 khz samples per channel
-/// check framing and the 120 ms limit; the codec validates stream payloads
+/// check framing and the 120 ms limit. The codec validates stream payloads
 fn opusDuration(packet_bytes: []const u8) Error!u16 {
     if (packet_bytes.len == 0) return error.InvalidData;
     const toc = packet_bytes[0];
     // toc bit 7, celt uses 2.5, 5, 10 or 20 ms frames
-    // bits 6 to 5 both set, hybrid uses 10 or 20 ms; silk uses 10, 20, 40 or 60 ms
+    // bits 6 to 5 both set, hybrid uses 10 or 20 ms. Silk uses 10, 20, 40 or 60 ms
     const samples_per_frame: u16 = if (toc & 128 != 0)
         @as(u16, 120) << @as(u2, @truncate(toc >> 3))
     else if (toc & 0x60 == 0x60)
@@ -306,7 +305,7 @@ fn opusDuration(packet_bytes: []const u8) Error!u16 {
 }
 
 /// read an audio page and calculate untrimmed positions
-/// granule ends its last completed packet; the final page may trim output
+/// granule ends its last completed packet. The final page may trim output
 fn loadAudioPage(self: *Self) Error!bool {
     if (self.is_vorbis) return self.loadVorbisPage();
     return self.loadOpusPage();
@@ -317,7 +316,7 @@ fn readFirstHeader(self: *Self, bytes: []const u8) Error!void {
     if (std.mem.startsWith(u8, bytes, "\x01vorbis")) {
         if (!codec_options.vorbis) return error.UnsupportedEncoding;
         // identification header: type, signature, version, channels, rate,
-        // three bitrate hints, block sizes and framing; native headers validate fields
+        // three bitrate hints, block sizes and framing. Native headers validate fields
         if (bytes.len != 30) return error.InvalidData;
         self.is_vorbis = true;
         self.vorbis_headers = .{ .allocator = self.allocator };
@@ -448,7 +447,7 @@ fn loadOpusPage(self: *Self) Error!bool {
     return false;
 }
 
-/// read headers before audio; use codec block sizes to calculate timing
+/// read headers before audio and use codec block sizes to calculate timing
 fn loadVorbisPage(self: *Self) Error!bool {
     if (!codec_options.vorbis) return error.UnsupportedEncoding;
     while (try self.pages.nextPage()) {

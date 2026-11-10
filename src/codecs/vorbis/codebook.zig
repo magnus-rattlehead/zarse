@@ -110,7 +110,7 @@ pub const Codebook = struct {
         self.* = .{};
     }
 
-    /// temporary lookup params; only expanded vectors survive setup
+    /// temporary lookup params, only expanded vectors survive setup
     const Lookup = struct {
         minimum: f32,
         delta: f32,

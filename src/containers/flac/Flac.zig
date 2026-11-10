@@ -132,7 +132,7 @@ fn takeFrame(self: *Self) Error!?types.Packet {
             self.metadata.total_frames = self.frame;
             return null;
         }
-        // flac has no frame length field; walk encoded subframes and checksums
+        // flac has no frame length field. Walk encoded subframes and checksums
         // without reconstructing pcm to locate the exact end of this packet
         const parsed = flac.Frame.scan(
             self.config,
@@ -168,7 +168,7 @@ pub fn next(self: *Self) Error!PacketSource.Event {
 }
 
 /// compact consumed bytes and refill, retain any incomplete encoded frame
-/// invalidates buffer slices; a frame larger than the buffer exceeds the limit
+/// invalidates buffer slices. A frame larger than the buffer exceeds the limit
 fn fill(self: *Self) Error!void {
     // readSliceShort fills the requested space unless it reaches eof
     _ = try input_helpers.refill(self);

@@ -80,7 +80,7 @@ pub fn frameChecksum(self: *const Self) u16 {
 }
 
 /// crc-8 with polynomial used by flac
-const Crc8 = std.hash.crc.Crc(
+const Crc8 = std.hash.crc.Generic(
     u8,
     .{
         .initial = 0,
@@ -92,7 +92,7 @@ const Crc8 = std.hash.crc.Crc(
 );
 
 /// crc-16 with polynomial used by flac
-const Crc16 = std.hash.crc.Crc(
+const Crc16 = std.hash.crc.Generic(
     u16,
     .{
         .initial = 0,

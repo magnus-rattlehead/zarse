@@ -4,7 +4,6 @@ const types = @import("../../types.zig");
 const input_helpers = @import("../../input.zig");
 const Source = @import("../../Source.zig");
 pub const Error = types.ParserError;
-pub const ParseError = types.ParserError;
 
 pub const ChunkHeader = struct {
     id: [4]u8,
@@ -12,14 +11,14 @@ pub const ChunkHeader = struct {
     size: u64,
 };
 
-pub fn readRequired(source: Source, out: []u8) ParseError!void {
+pub fn readRequired(source: Source, out: []u8) Error!void {
     return input_helpers.readRequired(source.reader, out);
 }
 
 /// rf64 or bw64 size overrides and ordered size table
 pub const DataSize64 = struct {
     data_size: u64,
-    /// rf64 samples per channel; zero is unspecified, null for bw64
+    /// rf64 samples per channel, zero is unspecified, null for bw64
     sample_count: ?u64,
     /// 12-byte entries: fourcc followed by a little endian u64
     table: types.DataRange,
@@ -40,14 +39,14 @@ pub fn frame(
     end: u64,
     kind: types.Format,
 ) Error!Chunk {
-    // riff uses fourcc and u32; wave64 uses guid and u64 with inclusive size
+    // riff uses fourcc and u32. Wave64 uses guid and u64 with inclusive size
     const header_size: u64 = if (kind == .wave64) 24 else 8;
     if (offset > end or end - offset < header_size) return error.InvalidData;
     const payload_offset = offset + header_size;
     if (header.size > end - payload_offset) return error.InvalidData;
     const payload_end = payload_offset + header.size;
-    // wave64 data uses its declared size; other chunks align to eight bytes
-    // with optional final padding; riff pads odd payload lengths
+    // wave64 data uses its declared size. Other chunks align to eight bytes
+    // with optional final padding. Riff pads odd payload lengths
     const padding = if (kind == .wave64)
         (if (std.mem.eql(u8, &header.id, "data"))
             0
@@ -84,7 +83,7 @@ pub const FormatChunk = struct {
     byte_rate: u32,
     /// encoded bytes per block
     block_align: u16,
-    /// declared bits per sample; encoding determines meaning
+    /// declared bits per sample, encoding determines meaning
     bits_per_sample: u16,
     /// extra format data, or null if absent
     extension: ?FormatExtension = null,
@@ -102,7 +101,7 @@ pub const FormatChunk = struct {
         };
     }
 
-    /// resolve standard subtypes; preserve unknown tags
+    /// resolve standard subtypes and preserve unknown tags
     /// return null for custom or missing subtypes
     pub fn encoding(self: FormatChunk) ?FormatTag {
         if (self.audio_format != .extensible) return self.audio_format;
@@ -214,13 +213,13 @@ pub const FormatExtension = struct {
 pub const ExtensibleFormat = struct {
     /// significant bits within the sample storage width
     valid_bits_per_sample: u16,
-    /// speaker positions; zero means unspecified
+    /// speaker positions, zero means unspecified
     channel_mask: u32,
-    /// subtype guid in file byte order; resolve through the encoding helper
+    /// subtype guid in file byte order, resolved through the encoding helper
     sub_format: [16]u8,
 };
 
-/// validate format fields; padded allows trailing eight byte alignment
+/// validate format fields. padded allows trailing eight byte alignment
 fn parseFormatPayload(
     state: *Reader,
     data: types.DataRange,
@@ -430,7 +429,7 @@ pub const Reader = struct {
     frames: u64 = 0,
     finished: bool = false,
 
-    /// open after the four byte prefix; sequential input retains the size table
+    /// open after the four byte prefix. Sequential input retains the size table
     pub fn initPrefix(
         allocator: std.mem.Allocator,
         source: Source,
@@ -653,7 +652,7 @@ pub const Reader = struct {
         return frame(header, offset, end, .wav);
     }
 
-    /// walk metadata and return audio segments; leave input at their data
+    /// walk metadata, return audio segments, and leave input at their data
     pub fn next(self: *Self) ReadError!?types.Segment {
         if (self.finished) return null;
         while (true) {

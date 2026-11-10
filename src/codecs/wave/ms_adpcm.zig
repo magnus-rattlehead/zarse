@@ -36,7 +36,7 @@ pub fn init(
             allocator,
             .{ .config = config, .channels = format.channels },
             .ms_adpcm,
-            .{ .blocks = config.block_align },
+            config.block_align,
             config.samples_per_block,
             format,
             options,

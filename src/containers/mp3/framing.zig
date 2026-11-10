@@ -49,13 +49,13 @@ pub const Header = struct {
         // sync word, all 8 bits of byte 0 and the high 3 bits of byte 1 are set
         if (bytes[0] != 0xff or bytes[1] & 0xe0 != 0xe0)
             return error.InvalidData;
-        // version bits 4 to 3 cannot be 01; layer bits 2 to 1 cannot be 00
+        // version bits 4 to 3 cannot be 01. Layer bits 2 to 1 cannot be 00
         if (bytes[1] & 0x18 == 0x08 or bytes[1] & 0x06 == 0)
             return error.InvalidData;
         // bitrate index 1111 and sample rate index 11 are reserved
         if (bytes[2] & 0xf0 == 0xf0 or bytes[2] & 0x0c == 0x0c)
             return error.InvalidData;
-        // layer bits 01 mean layer iii; valid layers i and ii are outside this reader
+        // layer bits 01 mean layer iii. Valid layers i and ii are outside this reader
         if (bytes[1] & 0x06 != 0x02) return error.UnsupportedFormat;
         return .{ .bytes = bytes[0..4].* };
     }
@@ -81,7 +81,7 @@ pub const Header = struct {
         return @truncate(self.bytes[3] >> 4);
     }
 
-    /// mono has one channel; every other channel mode has two
+    /// mono has one channel. Every other channel mode has two
     pub fn channels(self: Header) u16 {
         return if (self.mode() == .mono) 1 else 2;
     }
@@ -117,7 +117,7 @@ pub const Header = struct {
     pub fn bitrateKbps(self: Header) u32 {
         const mpeg1: usize = @intFromBool(self.version() == .mpeg1);
         // table axes, mpeg 2 or 2.5 or mpeg 1, layer zero for layer iii, bitrate index
-        // values store half the bitrate; shifting byte 2 extracts its high nibble
+        // values store half the bitrate. Shifting byte 2 extracts its high nibble
         return 2 * @as(u32, halfrate[mpeg1][0][self.bytes[2] >> 4]);
     }
 
@@ -138,7 +138,7 @@ pub const Header = struct {
         return if (self.version() == .mpeg1) 1152 else 576;
     }
 
-    /// return total encoded bytes, including padding; free_format_bytes is the
+    /// return total encoded bytes, including padding. free_format_bytes is the
     /// inferred unpadded size, return null until free format size known
     pub fn frameBytes(self: Header, free_format_bytes: ?u16) ?u32 {
         // multiply pcm frames by kbps and 125, divide by hertz to get encoded bytes
@@ -155,7 +155,7 @@ pub const Header = struct {
 
     /// compare validated headers for stream sync, allow bitrate and channel mode changes
     pub fn compatible(self: Header, other: Header) bool {
-        // xor marks differing bits; 0xfe compares byte 1 except its crc bit
+        // xor marks differing bits. 0xfe compares byte 1 except its crc bit
         if ((self.bytes[1] ^ other.bytes[1]) & 0xfe != 0) return false;
         if ((self.bytes[2] ^ other.bytes[2]) & 0x0c != 0) return false;
         // frame size discovery must use same method for both headers

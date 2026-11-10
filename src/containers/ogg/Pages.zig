@@ -16,7 +16,6 @@ pub const PacketView = struct {
 };
 allocator: std.mem.Allocator,
 input: Input,
-limit: usize,
 assembly: []u8 = &.{},
 length: usize = 0,
 partial_offset: usize = 0,
@@ -43,7 +42,7 @@ flags: u8 = 0,
 /// reserve a partial packet plus one page
 /// cleanup is required even on failure
 pub fn initBuffers(self: *Self, capacity: usize) Error!void {
-    self.packet_capacity = @min(capacity, self.limit);
+    self.packet_capacity = capacity;
     if (self.packet_capacity == 0) return error.LimitExceeded;
     const capacity_bytes = std.math.add(
         usize,
@@ -54,7 +53,7 @@ pub fn initBuffers(self: *Self, capacity: usize) Error!void {
     self.assembly = try self.allocator.alloc(u8, capacity_bytes);
     self.page_buffer = try self.allocator.alloc(u8, framing.maxPageBytes);
 }
-/// read packets completed on one page; reject missing stream ends,
+/// read packets completed on one page and reject missing stream ends,
 /// final fragments, chained streams and multiplexed streams
 pub fn nextPage(self: *Self) Error!bool {
     if (self.finished) return false;
@@ -229,7 +228,7 @@ pub const Input = struct {
     /// byte offset from input start, including the prefix
     position: u64 = 0,
 
-    /// read prefix then source; a short count means end of input
+    /// read prefix then source. A short count means end of input
     pub fn read(self: *Input, out: []u8) Error!usize {
         var bytesRead: usize = 0;
         // replay detection bytes before reading remaining source
@@ -253,7 +252,7 @@ pub const Input = struct {
     pub fn required(self: *Input, out: []u8) Error!void {
         return input_helpers.readRequired(self, out);
     }
-    /// seek absolutely and disable prefix replay; requires seek support
+    /// seek absolutely and disable prefix replay. Requires seek support
     pub fn seek(self: *Input, offset: u64) Error!void {
         try self.source.seekTo(offset);
         self.prefixPosition = 4;

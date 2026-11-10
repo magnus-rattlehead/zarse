@@ -76,7 +76,7 @@ const Scratch = struct {
     ist_pos: [2][39]u8 = @splat(@splat(0)),
 };
 
-/// msb first cursor; short fields return errors
+/// msb first cursor, short fields return errors
 /// failed reads, peeks and skips leave the cursor unchanged
 const Bits = bit_reader.SliceReader(.big);
 
@@ -106,12 +106,12 @@ pub fn init(
     const unit = Self{ .format = format };
     // mpeg 1 produces at most 1152 pcm frames per channel per encoded packet
     return Codec.UnitAdapter(Self)
-        .init(allocator, unit, .mp3, .packets, 1152, format, options);
+        .init(allocator, unit, .mp3, null, 1152, format, options);
 }
 
 /// decode one complete mpeg 1 layer iii frame, return pcm frames per channel
 /// save available main data and return zero while earlier bytes are missing
-/// output must be channel aligned and hold 1152 frames; input failures require reset before reuse
+/// output must be channel aligned and hold 1152 frames. Input failures require reset before reuse
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
     if (bytes.len == 0) return error.InvalidData;
     return self.decodeFrame(bytes, output)

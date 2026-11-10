@@ -15,7 +15,7 @@ pub const ReadUnaryError = error{
     || Error;
 
 /// peek up to 32 bits without moving the cursor
-/// short input returns EndOfStream; widths above 32 return InvalidBitCount
+/// short input returns EndOfStream. Widths above 32 return InvalidBitCount
 pub fn peek(
     comptime order: std.builtin.Endian,
     input: []const u8,

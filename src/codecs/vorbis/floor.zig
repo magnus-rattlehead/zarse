@@ -477,7 +477,7 @@ pub const Floor1 = struct {
     }
 };
 
-// precompute floor gains; packet decoding only indexes the table
+// precompute floor gains. Packet decoding only indexes the table
 const inverse_db = table: {
     @setEvalBranchQuota(100_000);
     var values: [256]f32 = undefined;

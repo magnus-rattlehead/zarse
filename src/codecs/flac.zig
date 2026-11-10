@@ -46,33 +46,27 @@ pub fn init(
             or format.sample_rate != config.sample_rate
     )
         return error.InvalidData;
-    var unit: Self = .{
+    const unit: Self = .{
         .allocator = allocator,
         .frame = try Frame.init(allocator, config),
     };
-    defer unit.deinit();
     return Codec.UnitAdapter(Self)
         .init(
             allocator,
-            unit.take(),
+            unit,
             .flac,
-            .packets,
+            null,
             config.max_block_size,
             format,
             options,
         );
 }
 
-/// leave self empty and safe to deinit
-pub fn take(self: *Self) Self {
-    return .{ .allocator = self.allocator, .frame = self.frame.take() };
-}
-
 pub fn validateConfig(info: types.FlacConfig) types.Error!void {
     info.validate() catch |err| return mapError(err);
 }
 
-/// output must be channel aligned and hold the configured maximum block; input failures require reset
+/// output must be channel aligned and hold the configured maximum block. Input failures require reset
 pub fn decodeUnit(
     self: *Self,
     bytes: []const u8,

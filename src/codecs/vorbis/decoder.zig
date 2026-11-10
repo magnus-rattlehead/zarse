@@ -171,16 +171,6 @@ pub const Decoder = struct {
         return self;
     }
 
-    /// leave self empty and safe to deinit
-    pub fn take(self: *Decoder) Decoder {
-        const owned = self.*;
-        self.* = .{
-            .allocator = self.allocator,
-            .setup = .{ .allocator = self.setup.allocator },
-        };
-        return owned;
-    }
-
     pub fn deinit(self: *Decoder) void {
         self.setup.deinit();
         for (&self.transforms) |*transform| transform.deinit(self.allocator);
@@ -410,7 +400,7 @@ pub const Decoder = struct {
                 output[index * self.channels + channel] = row[index];
             }
         }
-        // final samples leave the timeline; the tail overlaps the next block
+        // final samples leave the timeline. The tail overlaps the next block
         for (0..self.channels) |channel| {
             const row = self.state.timeline[channel * (self.block * 2)..];
             const rest = self.state.timeline_len - count;

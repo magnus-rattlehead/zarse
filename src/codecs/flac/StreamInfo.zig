@@ -28,9 +28,9 @@ pub const Error = error{
 min_block_size: u16,
 /// samples per channel
 max_block_size: u16,
-/// encoded bytes; zero means unknown
+/// encoded bytes, zero means unknown
 min_frame_size: u24,
-/// encoded bytes; zero means unknown
+/// encoded bytes, zero means unknown
 max_frame_size: u24,
 /// sample rate in hz
 sample_rate: u32,
@@ -38,7 +38,7 @@ sample_rate: u32,
 channels: u8,
 /// 4..32 bits per sample
 bits_per_sample: u6,
-/// total pcm frames; zero means unknown
+/// total pcm frames, zero means unknown
 sample_count: u36,
 
 pub fn parse(br: *BitReader) Error!StreamInfo {

@@ -30,16 +30,16 @@ pub fn init(
             allocator,
             .{ .channels = format.channels },
             .alaw,
-            try scheme(format.channels),
+            try unitBytes(format.channels),
             1,
             format,
             options,
         );
 }
 
-pub fn scheme(channels: u16) Error!types.InputScheme {
+pub fn unitBytes(channels: u16) Error!u32 {
     if (channels == 0) return error.InvalidData;
-    return .{ .samples = channels };
+    return channels;
 }
 
 pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
@@ -57,9 +57,9 @@ fn decodeSample(byte: u8) f32 {
     const sign = input & 0x80; // extract sign bit
     const exponent = (input & 0x70) >> 4; // extract three segment bits
     const mantissa = input & 0x0f; // extract the four magnitude bits
-    // base steps are 16 pcm units wide; reconstruct their midpoint with +8
+    // base steps are 16 pcm units wide. Reconstruct their midpoint with +8
     var sample: i32 = (@as(i32, mantissa) << 4) + 8;
-    // nonzero segments start at 256; segments above one double at each step
+    // nonzero segments start at 256. Segments above one double at each step
     if (exponent != 0) sample += 256;
     if (exponent > 1) sample <<= @intCast(exponent - 1);
 

@@ -30,7 +30,7 @@ pub fn build(builder: *std.Build) !void {
         "Enable WAVE codec scaffolding (A-law, mu-law, ADPCM)",
     )
         orelse true;
-    const opus = builder.option(bool, "opus", "Enable the libopus backend")
+    const opus = builder.option(bool, "opus", "Enable the Zig Opus decoder")
         orelse true;
     const vorbis = builder.option(bool, "vorbis", "Enable the vorbis backend")
         orelse true;
@@ -44,11 +44,6 @@ pub fn build(builder: *std.Build) !void {
     options.addOption(bool, "opus", opus);
     options.addOption(bool, "vorbis", vorbis);
     module.addOptions("build_options", options);
-    if (opus) {
-        if (builder.lazyDependency("opus", .{})) |dep| {
-            @import("build/opus.zig").add(builder, module, dep);
-        }
-    }
     const example = builder.addExecutable(
         .{
             .name = "zarse-info",
@@ -64,7 +59,7 @@ pub fn build(builder: *std.Build) !void {
     );
     builder.installArtifact(example);
     const run = builder.addRunArtifact(example);
-    if (builder.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     builder.step("run", "Inspect and decode an audio file").dependOn(&run.step);
 
     const check = builder.step("check", "Compile the example");

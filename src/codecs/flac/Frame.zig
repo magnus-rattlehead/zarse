@@ -93,15 +93,6 @@ pub fn deinit(self: *Frame, allocator: Allocator) void {
     self.block_size = 0;
 }
 
-/// leave self empty and safe to deinit
-pub fn take(self: *Frame) Frame {
-    const owned = self.*;
-    self.buffer = &.{};
-    for (&self.subframes, 0..) |*subframe, channel| subframe.* = .init(channel);
-    self.block_size = 0;
-    return owned;
-}
-
 /// scan mode shares the structural parser without allocating sample storage
 pub fn scan(info: StreamInfo, bytes: []const u8) ReadError!Frame {
     var frame: Frame = .{
@@ -129,7 +120,7 @@ pub fn firstSample(self: *const Frame) u64 {
     };
 }
 
-/// read one frame; decode reconstructs samples and invalidates previous subframes
+/// read one frame. decode reconstructs samples and invalidates previous subframes
 pub fn read(
     self: *Frame,
     br: *BitReader,

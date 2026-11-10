@@ -6,7 +6,6 @@ pub const Format = enum { wav, wave64, ogg, mp3, flac };
 /// sample storage width and numeric representation
 pub const PcmSampleType = enum {
     unsigned8,
-    signed8,
     signed16,
     signed24,
     signed32,
@@ -16,7 +15,7 @@ pub const PcmSampleType = enum {
 
     pub fn byteSize(self: PcmSampleType) usize {
         return switch (self) {
-            .unsigned8, .signed8 => 1,
+            .unsigned8 => 1,
             .signed16 => 2,
             .signed24 => 3,
             .signed32, .float32 => 4,
@@ -25,7 +24,7 @@ pub const PcmSampleType = enum {
     }
 };
 
-/// store interleaved pcm; reduced precision integers use the highest bits
+/// store interleaved pcm. Reduced precision integers use the highest bits
 /// null valid_bits uses all storage bits
 pub const PcmFormat = struct {
     sample_type: PcmSampleType,
@@ -59,7 +58,7 @@ pub const MsAdpcmConfig = struct {
     block_align: u16,
     samples_per_block: u16,
     byte_order: std.builtin.Endian = .little,
-    /// number of active coefficients; predictor selectors are u8
+    /// number of active coefficients, predictor selectors are u8
     coefficient_count: u16,
     coefficients: [256]AdpcmCoefficient = @splat(.{ .first = 0, .second = 0 }),
 };
@@ -106,7 +105,7 @@ pub const DataRange = struct {
     offset: u64 = 0,
     length: u64 = 0,
 
-    /// return the exclusive end offset; reject overflow
+    /// return the exclusive end offset and reject overflow
     pub fn end(self: DataRange) ValidationError!u64 {
         return std.math.add(u64, self.offset, self.length)
             catch error.InvalidData;
@@ -132,9 +131,9 @@ pub const Info = struct {
     format: Format,
     sample_rate: u32,
     channels: u16,
-    /// wave speaker bits; null preserves unspecified source channel order
+    /// wave speaker bits, null preserves unspecified source channel order
     channel_mask: ?u32 = null,
-    /// total pcm frames, one sample per channel; null means unknown
+    /// total pcm frames, one sample per channel, null means unknown
     total_frames: ?u64,
 
     /// return duration, or null for unknown counts
@@ -168,31 +167,28 @@ pub const DecodeError = error{
 
 pub const ReadError = std.Io.Reader.Error;
 pub const SeekError = std.Io.File.Reader.SeekError;
-pub const SourceSeekError = SeekError || error{ Unseekable };
 pub const SizeError = std.Io.File.Reader.SizeError || error{ Unseekable };
 
 pub const IoError = ReadError || SeekError || SizeError;
 
 pub const ParserError = ParseError || IoError;
 
-pub const DecoderError = ParseError
+pub const Error = ParseError
     || DecodeError
     || IoError
     || std.mem.Allocator.Error;
-
-pub const Error = DecoderError;
 
 /// caller-selected working capacity and limits for payloads and seek history
 /// the library sizes codec state, scratch and sample storage internally
 /// buffer_bytes is not a total memory budget
 pub const Options = struct {
-    /// limit packet and config bytes, excluding c codec allocations
+    /// limit packet and retained configuration bytes
     max_payload_bytes: usize = 64 * 1024 * 1024,
     /// limit seek index storage, including spare capacity
     max_index_bytes: usize = 64 * 1024 * 1024,
     /// required capacity for encoded input assembly and retained format metadata
-    /// capped by max_payload_bytes; insufficient capacity returns LimitExceeded
-    /// choose before opening; flac frames, ogg packets and fixed pcm units must fit
+    /// capped by max_payload_bytes. Insufficient capacity returns LimitExceeded
+    /// choose before opening. Flac frames, ogg packets and fixed pcm units must fit
     /// mp3 also needs space for framing lookahead
     /// separate from the source reader buffer and caller's decoded output buffer
     buffer_bytes: usize,
@@ -203,24 +199,6 @@ pub const Options = struct {
     }
 };
 
-/// encoded unit boundaries expected by codec, sizes in bytes
-pub const InputScheme = union(enum) {
-    // one interleaved pcm frame per unit
-    samples: u32,
-    // one encoded block per unit, may decode to multiple frames
-    blocks: u32,
-    // container supplies variable sized packet boundaries
-    packets,
-
-    /// return bytes per unit, or null for packet framing
-    pub fn unitBytes(self: InputScheme) ?u32 {
-        return switch (self) {
-            .samples, .blocks => |size| size,
-            .packets => null,
-        };
-    }
-};
-
 /// decoded frame interval, inclusive start and exclusive end, null end means unknown
 pub const Presentation = struct { start: u64 = 0, end: ?u64 = null };
 
@@ -228,7 +206,7 @@ pub const Presentation = struct { start: u64 = 0, end: ?u64 = null };
 pub const AudioFormat = struct {
     sample_rate: u32,
     channels: u16,
-    /// wave speaker bits; null preserves unspecified source channel order
+    /// wave speaker bits, null preserves unspecified source channel order
     channel_mask: ?u32 = null,
 };
 
