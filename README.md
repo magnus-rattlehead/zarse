@@ -30,7 +30,7 @@ zig build -Dflac=false -Dwav=false -Dmp3=false -Dpcm=false -Dwave_codecs=false -
 The project is still a work in progress. Ideally most common containers/codecs/stream sources will
 be supported, along with the encoding step. Ideally for an inital release:
 
-- [] Decoding API gets completed (or close enough)
-- [] Create an encoding/writing API
+- [ ] Decoding API gets completed (or close enough)
+- [ ] Create an encoding/writing API
 
 expect breaking changes until then.
